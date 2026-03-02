@@ -1,0 +1,88 @@
+name: signature
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: signature-postgres
+    environment:
+      POSTGRES_DB: signature_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d signature_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: signature-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+    container_name: signature-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_NAME: Digital Signature Workflow Platform
+      API_PREFIX: /api
+      DEBUG: "false"
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/signature_db
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: super-secret-change-me
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRE_MINUTES: 1440
+      STORAGE_ROOT: /app/storage
+      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_storage:/app/storage
+      - .:/app
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000/api
+    container_name: signature-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:
+  backend_storage:
