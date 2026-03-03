@@ -1,4 +1,5 @@
 from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, hash_password, verify_password
 from app.domain.entities.enums import UserRole
@@ -7,19 +8,22 @@ from app.domain.repositories.user_repository import UserRepository
 
 
 class AuthService:
-    def __init__(self, user_repository: UserRepository) -> None:
+    def __init__(self, session: AsyncSession, user_repository: UserRepository) -> None:
+        self.session = session
         self.user_repository = user_repository
 
     async def register_user(self, name: str, email: str, password: str, role: UserRole) -> UserEntity:
         existing = await self.user_repository.get_by_email(email)
         if existing:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
-        return await self.user_repository.create(
+        user = await self.user_repository.create(
             name=name,
             email=email,
             password_hash=hash_password(password),
             role=role,
         )
+        await self.session.commit()
+        return user
 
     async def login(self, email: str, password: str) -> tuple[UserEntity, str]:
         user = await self.user_repository.get_by_email(email)

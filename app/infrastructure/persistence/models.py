@@ -16,7 +16,10 @@ class UserModel(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole, name="user_role"), nullable=False)
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, name="user_role", values_callable=lambda enum_cls: [item.value for item in enum_cls]),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
 
     uploaded_documents: Mapped[list["DocumentModel"]] = relationship(back_populates="uploader")
@@ -33,7 +36,13 @@ class DocumentModel(Base):
     final_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     total_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[DocumentStatus] = mapped_column(
-        Enum(DocumentStatus, name="document_status"), nullable=False, default=DocumentStatus.DRAFT
+        Enum(
+            DocumentStatus,
+            name="document_status",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+        ),
+        nullable=False,
+        default=DocumentStatus.DRAFT,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
 

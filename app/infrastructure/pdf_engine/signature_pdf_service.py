@@ -12,9 +12,18 @@ from app.domain.value_objects.signature_box import SignatureBox
 class SignaturePdfService:
     def __init__(self) -> None:
         self.supported_typed_fonts = {
-            "classic": "arial.ttf",
-            "script": "times.ttf",
-            "formal": "cour.ttf",
+            "classic": [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "arial.ttf",
+            ],
+            "script": [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
+                "times.ttf",
+            ],
+            "formal": [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+                "cour.ttf",
+            ],
         }
 
     def get_page_count(self, pdf_path: Path) -> int:
@@ -22,18 +31,31 @@ class SignaturePdfService:
         return len(reader.pages)
 
     def render_typed_signature(self, typed_name: str, typed_font: str) -> bytes:
-        image = Image.new("RGBA", (800, 220), (255, 255, 255, 0))
+        image = Image.new("RGBA", (1200, 340), (255, 255, 255, 0))
         draw = ImageDraw.Draw(image)
-        try:
-            font_name = self.supported_typed_fonts.get(typed_font, "arial.ttf")
-            font = ImageFont.truetype(font_name, 96)
-        except OSError:
-            font = ImageFont.load_default()
-        draw.text((20, 60), typed_name, fill=(20, 20, 20, 255), font=font)
+        font = self._resolve_typed_font(typed_font=typed_font, size=140)
+
+        text = typed_name.strip()
+        text_bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        x = max(20, (image.width - text_width) // 2)
+        y = max(20, (image.height - text_height) // 2)
+        draw.text((x, y), text, fill=(20, 20, 20, 255), font=font)
 
         output = io.BytesIO()
         image.save(output, format="PNG")
         return output.getvalue()
+
+    def _resolve_typed_font(self, typed_font: str, size: int) -> ImageFont.ImageFont:
+        candidates = self.supported_typed_fonts.get(typed_font, self.supported_typed_fonts["classic"])
+        for path in candidates:
+            try:
+                return ImageFont.truetype(path, size)
+            except OSError:
+                continue
+        # Pillow 11+ supports sized default font, which is far more visible than bitmap fallback.
+        return ImageFont.load_default(size=size)
 
     def apply_signature(
         self,

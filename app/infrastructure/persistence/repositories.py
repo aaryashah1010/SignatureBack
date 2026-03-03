@@ -58,7 +58,8 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
         self.session.add(model)
         await self.session.flush()
         await self.session.refresh(model)
-        return map_document(model)
+        # Freshly created documents have no regions yet; avoid async lazy-load on relationship access.
+        return map_document(model, include_regions=False)
 
     async def get_document_by_id(self, document_id: UUID) -> DocumentEntity | None:
         result = await self.session.execute(

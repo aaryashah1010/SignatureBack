@@ -36,7 +36,7 @@ def _get_audit_repo(session: AsyncSession) -> SqlAlchemyAuditLogRepository:
 
 
 def get_auth_service(session: Annotated[AsyncSession, Depends(get_db_session)]) -> AuthService:
-    return AuthService(user_repository=_get_user_repo(session))
+    return AuthService(session=session, user_repository=_get_user_repo(session))
 
 
 def get_document_workflow_service(

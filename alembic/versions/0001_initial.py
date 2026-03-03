@@ -18,8 +18,10 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-user_role_enum = sa.Enum("ADMIN", "SIGNER", name="user_role")
-document_status_enum = sa.Enum("Draft", "Pending", "Partially Signed", "Completed", name="document_status")
+user_role_enum = postgresql.ENUM("ADMIN", "SIGNER", name="user_role", create_type=False)
+document_status_enum = postgresql.ENUM(
+    "Draft", "Pending", "Partially Signed", "Completed", name="document_status", create_type=False
+)
 
 
 def upgrade() -> None:
