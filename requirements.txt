@@ -15,3 +15,11 @@ redis==5.2.1
 pypdf==5.1.0
 reportlab==4.2.5
 Pillow==11.0.0
+# ── External integration ──────────────────────────────────────────────────────
+# Async HTTP client for external callbacks with retry.
+httpx==0.28.1
+# SQL Server ODBC driver wrapper (requires ODBC Driver 17/18 on the host OS).
+# Install with: pip install pyodbc  (and the OS-level ODBC driver)
+pyodbc==5.2.0
+# 3DES encryption used by CpaDesk for document path encryption/decryption.
+pycryptodome==3.21.0

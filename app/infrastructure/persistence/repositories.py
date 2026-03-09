@@ -14,8 +14,24 @@ from app.domain.repositories.audit_repository import AuditRepository
 from app.domain.repositories.document_repository import DocumentRepository
 from app.domain.repositories.user_repository import UserRepository
 from app.domain.value_objects.signature_box import SignatureBox
-from app.infrastructure.persistence.mappers import map_audit_log, map_document, map_region, map_user
-from app.infrastructure.persistence.models import AuditLogModel, DocumentModel, SignatureRegionModel, UserModel
+from app.infrastructure.persistence.mappers import (
+    map_audit_log,
+    map_callback_record,
+    map_document,
+    map_integration_audit,
+    map_region,
+    map_user,
+)
+from app.infrastructure.persistence.models import (
+    AuditLogModel,
+    CallbackAuditLogModel,
+    DocumentModel,
+    IntegrationAuditLogModel,
+    SignatureRegionModel,
+    UserModel,
+)
+from app.domain.entities.integration import CallbackRecord, IntegrationAuditEntry
+from app.domain.repositories.integration_repository import CallbackAuditRepository, IntegrationAuditRepository
 
 
 class SqlAlchemyUserRepository(UserRepository):
@@ -47,13 +63,23 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create_document(self, title: str, uploaded_by: UUID, original_path: str, total_pages: int) -> DocumentEntity:
+    async def create_document(
+        self,
+        title: str,
+        uploaded_by: UUID,
+        original_path: str,
+        total_pages: int,
+        external_document_id: str | None = None,
+        external_path: str | None = None,
+    ) -> DocumentEntity:
         model = DocumentModel(
             title=title.strip(),
             uploaded_by=uploaded_by,
             original_path=original_path,
             total_pages=total_pages,
             status=DocumentStatus.DRAFT,
+            external_document_id=external_document_id,
+            external_path=external_path,
         )
         self.session.add(model)
         await self.session.flush()
@@ -169,6 +195,21 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
         await self.session.flush()
         return map_document(document)
 
+    async def get_by_external_document_id(self, external_document_id: str) -> DocumentEntity | None:
+        result = await self.session.execute(
+            select(DocumentModel)
+            .where(DocumentModel.external_document_id == external_document_id)
+            .options(selectinload(DocumentModel.signature_regions))
+        )
+        row = result.scalar_one_or_none()
+        return map_document(row) if row else None
+
+    async def get_external_document_id(self, document_id: UUID) -> str | None:
+        result = await self.session.execute(
+            select(DocumentModel.external_document_id).where(DocumentModel.id == document_id)
+        )
+        return result.scalar_one_or_none()
+
     def serialize_document_for_cache(self, document: DocumentEntity) -> dict:
         return {
             "id": str(document.id),
@@ -255,3 +296,90 @@ class SqlAlchemyAuditLogRepository(AuditRepository):
         self.session.add(model)
         await self.session.flush()
         return map_audit_log(model)
+
+
+class SqlAlchemyIntegrationAuditRepository(IntegrationAuditRepository):
+    """Persists integration lifecycle events into local PostgreSQL."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create_entry(
+        self,
+        event: str,
+        correlation_id: str,
+        external_user_id: str | None = None,
+        document_id: UUID | None = None,
+        external_document_id: str | None = None,
+        details: str = "",
+        success: bool = True,
+    ) -> IntegrationAuditEntry:
+        model = IntegrationAuditLogModel(
+            event=event,
+            correlation_id=correlation_id,
+            external_user_id=external_user_id,
+            document_id=document_id,
+            external_document_id=external_document_id,
+            details=details,
+            success=success,
+        )
+        self.session.add(model)
+        await self.session.flush()
+        return map_integration_audit(model)
+
+
+class SqlAlchemyCallbackAuditRepository(CallbackAuditRepository):
+    """Persists outbound callback attempt records for idempotency and retry tracking."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def get_by_idempotency_key(self, key: str) -> CallbackRecord | None:
+        result = await self.session.execute(
+            select(CallbackAuditLogModel).where(CallbackAuditLogModel.idempotency_key == key)
+        )
+        row = result.scalar_one_or_none()
+        return map_callback_record(row) if row else None
+
+    async def create_record(
+        self,
+        idempotency_key: str,
+        external_document_id: str,
+        external_user_id: str,
+        status: str,
+    ) -> CallbackRecord:
+        # Return existing record if already created (re-entrant safety).
+        existing = await self.get_by_idempotency_key(idempotency_key)
+        if existing:
+            return existing
+
+        model = CallbackAuditLogModel(
+            idempotency_key=idempotency_key,
+            external_document_id=external_document_id,
+            external_user_id=external_user_id,
+            status=status,
+            attempts=0,
+            succeeded=False,
+        )
+        self.session.add(model)
+        await self.session.flush()
+        return map_callback_record(model)
+
+    async def increment_attempt(
+        self,
+        record_id: UUID,
+        succeeded: bool,
+        error: str | None = None,
+    ) -> None:
+        from datetime import UTC, datetime
+
+        result = await self.session.execute(
+            select(CallbackAuditLogModel).where(CallbackAuditLogModel.id == record_id)
+        )
+        model = result.scalar_one_or_none()
+        if model:
+            model.attempts += 1
+            model.succeeded = succeeded
+            model.last_attempt_at = datetime.now(UTC)
+            model.last_error = error
+            await self.session.flush()

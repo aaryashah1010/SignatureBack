@@ -52,6 +52,16 @@ services:
       DB_HOST: postgres
       DB_PORT: 5432
       DB_USER: postgres
+      # ── Integration (fill in your values) ──────────────────────────────────
+      # SQL Server connection to CpaDesk_Phase_2
+      SQLSERVER_URL: "mssql+pyodbc://sa:Newtech%40%231010@69.30.224.78:9759/cpadesk_phase2?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes"
+      # HMAC secret shared with CpaDesk for signing launch tokens
+      INTEGRATION_SHARED_SECRET: "test-secret-123"
+      # External callback – set to your webhook.site URL for testing
+      EXTERNAL_API_BASE_URL: "https://webhook.site/PASTE-YOUR-ID-HERE"
+      EXTERNAL_API_AUTH_SECRET: ""
+      # Security prefix for DocumentMaster write-back (leave empty to allow any path)
+      DOCUMENT_BASE_PATH: ""
     ports:
       - "8000:8000"
     volumes:

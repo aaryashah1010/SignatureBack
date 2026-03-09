@@ -90,3 +90,51 @@ class SignDocumentRequest(BaseModel):
     typed_name: str | None = None
     typed_font: str | None = None
     uploaded_signature_base64: str | None = None
+
+
+# ── Integration schemas ───────────────────────────────────────────────────────
+
+
+class LaunchRequest(BaseModel):
+    """Raw launch token posted by the external software (or relayed by the frontend)."""
+
+    token: str = Field(min_length=10, description="HMAC-signed JWT from the external software")
+
+
+class LaunchResponse(BaseModel):
+    """Returned after a successful launch-token exchange."""
+
+    access_token: str
+    token_type: str = "bearer"
+    role: str
+    # Frontend uses next_route to navigate immediately to the correct page.
+    next_route: str
+    document_id: UUID | None = None
+    user: UserResponse
+
+
+class MappedSignerResponse(BaseModel):
+    """Signer entry returned from the mapping-constrained signer list."""
+
+    id: UUID
+    name: str
+    email: str
+
+
+class SubmitDocumentResponse(BaseModel):
+    """Result of a SIGNER submitting a fully-signed document."""
+
+    document_id: UUID
+    status: str
+    signed_regions: int
+    total_regions: int
+    callback_triggered: bool
+
+
+class SigningProgressResponse(BaseModel):
+    """Signing progress counter for the signer UI."""
+
+    document_id: UUID
+    assigned_total: int
+    assigned_signed: int
+    can_submit: bool

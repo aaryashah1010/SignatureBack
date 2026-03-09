@@ -1,9 +1,20 @@
+from datetime import UTC, datetime
+from uuid import UUID
+
 from app.domain.entities.audit_log import AuditLogEntity
 from app.domain.entities.document import DocumentEntity
+from app.domain.entities.integration import CallbackRecord, IntegrationAuditEntry
 from app.domain.entities.signature_region import SignatureRegionEntity
 from app.domain.entities.user import UserEntity
 from app.domain.value_objects.signature_box import SignatureBox
-from app.infrastructure.persistence.models import AuditLogModel, DocumentModel, SignatureRegionModel, UserModel
+from app.infrastructure.persistence.models import (
+    AuditLogModel,
+    CallbackAuditLogModel,
+    DocumentModel,
+    IntegrationAuditLogModel,
+    SignatureRegionModel,
+    UserModel,
+)
 
 
 def map_user(model: UserModel) -> UserEntity:
@@ -48,6 +59,8 @@ def map_document(model: DocumentModel, include_regions: bool = True) -> Document
         status=model.status,
         created_at=model.created_at,
         regions=regions,
+        external_document_id=getattr(model, "external_document_id", None),
+        external_path=getattr(model, "external_path", None),
     )
 
 
@@ -61,4 +74,33 @@ def map_audit_log(model: AuditLogModel) -> AuditLogEntity:
         user_agent=model.user_agent,
         document_hash=model.document_hash,
         timestamp=model.timestamp,
+    )
+
+
+def map_integration_audit(model: IntegrationAuditLogModel) -> IntegrationAuditEntry:
+    return IntegrationAuditEntry(
+        id=model.id,
+        event=model.event,
+        correlation_id=model.correlation_id,
+        external_user_id=model.external_user_id,
+        document_id=UUID(str(model.document_id)) if model.document_id else None,
+        external_document_id=model.external_document_id,
+        details=model.details,
+        success=model.success,
+        timestamp=model.timestamp,
+    )
+
+
+def map_callback_record(model: CallbackAuditLogModel) -> CallbackRecord:
+    return CallbackRecord(
+        id=model.id,
+        idempotency_key=model.idempotency_key,
+        external_document_id=model.external_document_id,
+        external_user_id=model.external_user_id,
+        status=model.status,
+        attempts=model.attempts,
+        last_attempt_at=model.last_attempt_at,
+        succeeded=model.succeeded,
+        last_error=model.last_error,
+        created_at=model.created_at,
     )

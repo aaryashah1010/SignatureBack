@@ -18,6 +18,11 @@ class DocumentEntity:
     status: DocumentStatus
     created_at: datetime
     regions: list[SignatureRegionEntity] = field(default_factory=list)
+    # Set when the document originates from an external integration launch.
+    external_document_id: str | None = None
+    # PhysicalRelativePath from DocumentMaster – relative path where the signed PDF
+    # should be written back after submission (joined with settings.document_base_path).
+    external_path: str | None = None
 
     def recompute_status(self) -> DocumentStatus:
         if not self.regions:

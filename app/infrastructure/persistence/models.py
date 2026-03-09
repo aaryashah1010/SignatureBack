@@ -35,6 +35,10 @@ class DocumentModel(Base):
     final_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     total_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Populated when the document was bootstrapped from an external system launch.
+    external_document_id: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    # PhysicalRelativePath from DocumentMaster – where the signed PDF is written back on submit.
+    external_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[DocumentStatus] = mapped_column(
         Enum(
             DocumentStatus,
@@ -84,3 +88,41 @@ class AuditLogModel(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
 
     document: Mapped["DocumentModel"] = relationship(back_populates="audit_logs")
+
+
+# ── Integration-specific tables ──────────────────────────────────────────────
+
+
+class IntegrationAuditLogModel(Base):
+    """Tracks all integration lifecycle events (launch, link, mapping, submit, callback)."""
+
+    __tablename__ = "integration_audit_logs"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    event: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    correlation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    external_user_id: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    # Optional FK to a local document – nullable because some events precede doc creation.
+    document_id: Mapped[str | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    external_document_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    details: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+
+
+class CallbackAuditLogModel(Base):
+    """Tracks idempotent outbound callbacks to the external system per document/event."""
+
+    __tablename__ = "callback_audit_logs"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # SHA-256 of (external_document_id + external_user_id + status) for dedup.
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    external_document_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    external_user_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(80), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    succeeded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)

@@ -9,7 +9,15 @@ from app.domain.value_objects.signature_box import SignatureBox
 
 class DocumentRepository(ABC):
     @abstractmethod
-    async def create_document(self, title: str, uploaded_by: UUID, original_path: str, total_pages: int) -> DocumentEntity:
+    async def create_document(
+        self,
+        title: str,
+        uploaded_by: UUID,
+        original_path: str,
+        total_pages: int,
+        external_document_id: str | None = None,
+        external_path: str | None = None,
+    ) -> DocumentEntity:
         raise NotImplementedError
 
     @abstractmethod
@@ -58,4 +66,14 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     def deserialize_document_from_cache(self, payload: dict) -> DocumentEntity:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_by_external_document_id(self, external_document_id: str) -> DocumentEntity | None:
+        """Find the local document linked to a given external_document_id."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_external_document_id(self, document_id: UUID) -> str | None:
+        """Return the external_document_id for a local document, or None."""
         raise NotImplementedError

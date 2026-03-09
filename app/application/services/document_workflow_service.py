@@ -164,8 +164,6 @@ class DocumentWorkflowService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Signature region not found")
         if region.assigned_to != signer_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Region is assigned to a different signer")
-        if region.signed:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Region already signed")
 
         client_box = SignatureBox(
             page_number=sign_request["page_number"],
@@ -181,20 +179,24 @@ class DocumentWorkflowService:
         method = SignatureMethod(sign_request["method"])
         signature_bytes = self._build_signature_bytes(method=method, payload=sign_request)
 
-        source_pdf = Path(document.final_path) if document.final_path else Path(document.original_path)
         target_pdf = self.settings.signed_storage_dir / f"{document.id}_{region.id}_{uuid4()}.pdf"
         signature_image_path = self.settings.signature_images_dir / f"{region.id}_{uuid4()}.png"
         signature_image_path.write_bytes(signature_bytes)
 
-        self.pdf_service.apply_signature(
-            source_pdf=source_pdf,
+        # Rebuild from original to avoid signature stacking artifacts and allow precise re-signing.
+        all_signatures = self._collect_signatures_for_render(
+            document=document,
+            target_region_id=region.id,
+            target_signature_bytes=signature_bytes,
+        )
+        self.pdf_service.apply_signatures(
+            source_pdf=Path(document.original_path),
             target_pdf=target_pdf,
-            page_number=region.box.page_number,
-            box=region.box,
-            signature_bytes=signature_bytes,
+            signatures=all_signatures,
         )
 
         signed_at = datetime.now(UTC)
+        was_resigned = region.signed
         await self.document_repository.mark_region_signed(
             region_id=region.id,
             signature_image_path=str(signature_image_path),
@@ -211,7 +213,7 @@ class DocumentWorkflowService:
         await self.audit_repository.create_log(
             document_id=document_id,
             user_id=signer_id,
-            action="REGION_SIGNED",
+            action="REGION_RESIGNED" if was_resigned else "REGION_SIGNED",
             ip_address=request_ip,
             user_agent=user_agent,
             document_hash=final_hash,
@@ -221,6 +223,29 @@ class DocumentWorkflowService:
         await self.event_bus.invalidate_key(f"pending_documents:{signer_id}")
         await self.event_bus.publish("workflow.events", {"type": "region_signed", "document_id": str(document_id)})
         return updated_document
+
+    def _collect_signatures_for_render(
+        self,
+        document: DocumentEntity,
+        target_region_id: UUID,
+        target_signature_bytes: bytes,
+    ) -> list[tuple[SignatureBox, bytes]]:
+        signatures: list[tuple[SignatureBox, bytes]] = []
+
+        for region in document.regions:
+            if region.id == target_region_id:
+                signatures.append((region.box, target_signature_bytes))
+                continue
+
+            if not region.signed or not region.signature_image_path:
+                continue
+
+            image_path = Path(region.signature_image_path)
+            if image_path.exists():
+                signatures.append((region.box, image_path.read_bytes()))
+
+        signatures.sort(key=lambda item: (item[0].page_number, item[0].y, item[0].x))
+        return signatures
 
     async def get_download_path_for_admin(self, document_id: UUID, admin_id: UUID) -> Path:
         document = await self.document_repository.get_document_by_id(document_id)

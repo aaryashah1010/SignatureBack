@@ -65,42 +65,62 @@ class SignaturePdfService:
         box: SignatureBox,
         signature_bytes: bytes,
     ) -> None:
+        self.apply_signatures(
+            source_pdf=source_pdf,
+            target_pdf=target_pdf,
+            signatures=[(SignatureBox(page_number=page_number, x=box.x, y=box.y, width=box.width, height=box.height), signature_bytes)],
+        )
+
+    def apply_signatures(
+        self,
+        source_pdf: Path,
+        target_pdf: Path,
+        signatures: list[tuple[SignatureBox, bytes]],
+    ) -> None:
         reader = PdfReader(str(source_pdf))
         writer = PdfWriter()
 
-        page = reader.pages[page_number - 1]
-        page_width = float(page.mediabox.width)
-        page_height = float(page.mediabox.height)
+        for box, signature_bytes in signatures:
+            page = reader.pages[box.page_number - 1]
+            page_width = float(page.mediabox.width)
+            page_height = float(page.mediabox.height)
 
-        box_width = box.width * page_width
-        box_height = box.height * page_height
-        box_x = box.x * page_width
+            box_width = box.width * page_width
+            box_height = box.height * page_height
+            box_x = box.x * page_width
 
-        # Stored y is normalized from top-left in UI; PDF origin is bottom-left.
-        box_y = page_height - ((box.y + box.height) * page_height)
+            # Stored y is normalized from top-left in UI; PDF origin is bottom-left.
+            box_y = page_height - ((box.y + box.height) * page_height)
+            overlay_png = self._prepare_overlay_png(signature_bytes=signature_bytes, box_width=box_width, box_height=box_height)
 
-        signature_image = Image.open(io.BytesIO(signature_bytes)).convert("RGBA")
-        signature_image.thumbnail((int(box_width), int(box_height)))
+            overlay_stream = io.BytesIO()
+            overlay = canvas.Canvas(overlay_stream, pagesize=(page_width, page_height))
+            overlay.drawImage(ImageReader(io.BytesIO(overlay_png)), box_x, box_y, width=box_width, height=box_height, mask="auto")
+            overlay.save()
+            overlay_stream.seek(0)
 
-        padded_image = Image.new("RGBA", (int(box_width), int(box_height)), (255, 255, 255, 0))
-        padded_image.paste(signature_image, (0, 0), signature_image)
-        buffered = io.BytesIO()
-        padded_image.save(buffered, format="PNG")
+            overlay_reader = PdfReader(overlay_stream)
+            page.merge_page(overlay_reader.pages[0])
 
-        overlay_stream = io.BytesIO()
-        overlay = canvas.Canvas(overlay_stream, pagesize=(page_width, page_height))
-        overlay.drawImage(ImageReader(io.BytesIO(buffered.getvalue())), box_x, box_y, width=box_width, height=box_height, mask="auto")
-        overlay.save()
-        overlay_stream.seek(0)
-
-        overlay_reader = PdfReader(overlay_stream)
-        page.merge_page(overlay_reader.pages[0])
-
-        for idx, source_page in enumerate(reader.pages):
-            if idx == page_number - 1:
-                writer.add_page(page)
-            else:
-                writer.add_page(source_page)
+        for source_page in reader.pages:
+            writer.add_page(source_page)
 
         with target_pdf.open("wb") as file_obj:
             writer.write(file_obj)
+
+    def _prepare_overlay_png(self, signature_bytes: bytes, box_width: float, box_height: float) -> bytes:
+        render_scale = 3
+        render_width = max(1, int(round(box_width * render_scale)))
+        render_height = max(1, int(round(box_height * render_scale)))
+
+        signature_image = Image.open(io.BytesIO(signature_bytes)).convert("RGBA")
+        signature_image.thumbnail((render_width, render_height), Image.Resampling.LANCZOS)
+
+        padded_image = Image.new("RGBA", (render_width, render_height), (255, 255, 255, 0))
+        paste_x = max(0, (render_width - signature_image.width) // 2)
+        paste_y = max(0, (render_height - signature_image.height) // 2)
+        padded_image.paste(signature_image, (paste_x, paste_y), signature_image)
+
+        buffered = io.BytesIO()
+        padded_image.save(buffered, format="PNG")
+        return buffered.getvalue()

@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.presentation.middlewares.request_id import RequestIDMiddleware
 from app.presentation.routers import auth, documents, users
+from app.presentation.routers.integration import router as integration_router
+from app.presentation.routers.integration import submit_router
 
 
 settings = get_settings()
@@ -22,6 +24,10 @@ app.add_middleware(
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(documents.router, prefix=settings.api_prefix)
 app.include_router(users.router, prefix=settings.api_prefix)
+# Integration: launch, mapped-signers, signing-progress
+app.include_router(integration_router, prefix=settings.api_prefix)
+# Submit: POST /api/documents/{id}/submit  (lives alongside existing document endpoints)
+app.include_router(submit_router, prefix=settings.api_prefix)
 
 
 @app.get("/health")
