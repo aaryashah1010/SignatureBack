@@ -33,6 +33,7 @@ services:
     build:
       context: .
     container_name: signature-backend
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,36 +43,33 @@ services:
       APP_NAME: Digital Signature Workflow Platform
       API_PREFIX: /api
       DEBUG: "false"
+      LOG_LEVEL: "warning"
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/signature_db
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET_KEY: super-secret-change-me
       JWT_ALGORITHM: HS256
       JWT_EXPIRE_MINUTES: 1440
       STORAGE_ROOT: /app/storage
-      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
+      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000","https://chatapp.sbs"]'
       DB_HOST: postgres
       DB_PORT: 5432
       DB_USER: postgres
       # ── Integration (fill in your values) ──────────────────────────────────
-      # SQL Server connection to CpaDesk_Phase_2
       SQLSERVER_URL: "mssql+pyodbc://sa:Newtech%40%231010@69.30.224.78:9759/cpadesk_phase2?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes"
-      # HMAC secret shared with CpaDesk for signing launch tokens
       INTEGRATION_SHARED_SECRET: "test-secret-123"
-      # External callback – set to your webhook.site URL for testing
-      EXTERNAL_API_BASE_URL: "https://webhook.site/PASTE-YOUR-ID-HERE"
+      EXTERNAL_API_BASE_URL: ""
       EXTERNAL_API_AUTH_SECRET: ""
-      # Security prefix for DocumentMaster write-back (leave empty to allow any path)
       DOCUMENT_BASE_PATH: ""
     ports:
       - "8000:8000"
     volumes:
       - backend_storage:/app/storage
-      - .:/app
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
-      interval: 10s
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
       timeout: 5s
-      retries: 10
+      retries: 5
+      start_period: 20s
 
   frontend:
     build:
@@ -79,6 +77,7 @@ services:
       args:
         VITE_API_BASE_URL: http://localhost:8000/api
     container_name: signature-frontend
+    restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy

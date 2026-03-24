@@ -65,6 +65,12 @@ class ExternalUserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_client_by_id(self, client_id: str) -> ExternalUserEntity | None:
+        """Look up a signer directly from the Client table by ClientID.
+        Used when ClientID may numerically conflict with a LoginDetailID."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_mapped_signers_for_admin(self, admin_external_user_id: str) -> list[ExternalUserEntity]:
         """Return clients mapped to this admin via CAPUserClientMapping."""
         raise NotImplementedError

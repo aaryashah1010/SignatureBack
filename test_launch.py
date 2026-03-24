@@ -23,14 +23,14 @@ FRONTEND_URL = "http://localhost:5173"
 
 # ── ESign flow (new) ──────────────────────────────────────────────────────────
 # Set these to real values from the CpaDesk ESignRequests table.
-ESIGN_REQUEST_ID = 1          # ESignRequests.ESignRequestID
+ESIGN_REQUEST_ID = 1          # ESignRequestID=1 → admin=1219 (ABJ Admin), signer=1262 (karan client)
 LOGIN_TOKEN      = ""         # LoginDetail.Token for the role being launched (leave empty to skip verification)
 # NOTE: role is NOT needed in the ESign JWT — it is read from ESignRequests.AssignedRole in the DB.
 
 # ── Legacy flow (old) ─────────────────────────────────────────────────────────
-LOGIN_DETAIL_ID = "31"        # sub – LoginDetailID of Brijesh Patel (admin)
-FILE_ID         = "2095"      # file_id – FileID from FileMaster
-LEGACY_ROLE     = "admin"     # "admin" or "user"
+LOGIN_DETAIL_ID = "31"        # sub – LoginDetailID=31 (Brijesh → ADMIN)
+FILE_ID         = "2"         # file_id – FileID from FileMaster
+LEGACY_ROLE     = "admin"     # "admin" for CPAUser, "user" for Client
 DOCUMENT_PATH   = "https://cpaapi.newtechtest.in/CPADeskDocumentUpload/file-example_PDF_500_kB.pdf"
 
 # ─────────────────────────────────────────────────────────────────────────────

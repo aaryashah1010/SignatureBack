@@ -98,12 +98,13 @@ def encrypt_path(plain_path: str, _encryption_key: str = "") -> str:
 
 # Role values the external system (CpaDesk) sends in the launch token.
 _ROLE_MAP: dict[str, str] = {
-    "admin":     "ADMIN",   # CPA admin → our ADMIN role
-    "user":      "SIGNER",  # client user → our SIGNER role
-    "client":    "SIGNER",  # alternative label the external system may use
-    "cpauser":   "ADMIN",   # new ESign flow: CpaDesk CPA user
-    "cpaclient": "SIGNER",  # new ESign flow: CpaDesk client
-    # Pass-through in case the token already uses our internal labels.
+    "admin":     "ADMIN",
+    "user":      "SIGNER",
+    "client":    "SIGNER",
+    "cpauser":   "ADMIN",
+    "cpaclient": "SIGNER",
+    "cpaadmin":  "ADMIN",   # CPAAdmin (RoleID 2) from ESignRequests.AssignedRole
+    # Pass-through
     "ADMIN":  "ADMIN",
     "SIGNER": "SIGNER",
 }
@@ -371,7 +372,12 @@ class IntegrationService:
             return local_user
 
         # ── Legacy flow: look up via SQL Server ───────────────────────────────
-        ext_user = await self._ext_user_repo.get_user_by_external_id(ctx.external_user_id)
+        # For signers use Client table directly to avoid conflicts where
+        # ClientID == LoginDetailID but belong to different people.
+        if ctx.role == "SIGNER":
+            ext_user = await self._ext_user_repo.get_client_by_id(ctx.external_user_id)
+        else:
+            ext_user = await self._ext_user_repo.get_user_by_external_id(ctx.external_user_id)
         if not ext_user:
             await self._audit("USER_NOT_FOUND_IN_SQLSERVER", success=False,
                               external_user_id=ctx.external_user_id)
@@ -673,17 +679,34 @@ class IntegrationService:
         except (TypeError, ValueError):
             pass
 
-        writeback_ok = False
+        # Mark document as Completed in the database immediately.
+        from sqlalchemy import update as _sa_update
+        from app.infrastructure.persistence.models import DocumentModel
+        await self._session.execute(
+            _sa_update(DocumentModel)
+            .where(DocumentModel.id == document_id)
+            .values(status="Completed")
+        )
+
+        # Fire external callbacks in the background so the signer's response is
+        # not delayed by slow / unreachable CpaDesk endpoints.
+        def _log_task_error(task: "asyncio.Task") -> None:  # noqa: F821
+            if not task.cancelled() and task.exception():
+                logger.error("Background callback task failed: %s", task.exception())
+
+        import asyncio as _asyncio
         if esign_request_id:
-            writeback_ok = await self._send_esign_document_prepared(
+            t1 = _asyncio.create_task(self._send_esign_document_prepared(
                 document=document,
                 esign_request_id=esign_request_id,
                 status="Completed",
-            )
-            await self._send_esign_completion(esign_request_id=esign_request_id)
+            ))
+            t1.add_done_callback(_log_task_error)
+            t2 = _asyncio.create_task(self._send_esign_completion(esign_request_id=esign_request_id))
+            t2.add_done_callback(_log_task_error)
         else:
-            # Legacy flow: old-style writeback
-            writeback_ok = await self._writeback_signed_pdf(document)
+            t = _asyncio.create_task(self._writeback_signed_pdf(document))
+            t.add_done_callback(_log_task_error)
 
         await self._audit(
             "DOCUMENT_SUBMITTED",
@@ -756,6 +779,28 @@ class IntegrationService:
             pdf_path=original_path,
         )
 
+    async def _get_esign_base_url(self, esign_request_id: int) -> str | None:
+        """Extract the base URL dynamically from the decrypted FileURL in ESignRequests.
+
+        This makes callbacks work regardless of whether the client is using
+        ngrok, a test server, or production — no hardcoded config needed.
+        """
+        from urllib.parse import urlparse
+        row = await self._ext_user_repo.get_esign_request(esign_request_id)
+        if not row:
+            return self._settings.external_api_base_url or None
+        encrypted_url = row.get("FileURL") or ""
+        if not encrypted_url:
+            return self._settings.external_api_base_url or None
+        decrypted = decrypt_path(encrypted_url)
+        try:
+            parsed = urlparse(decrypted)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            logger.debug("Resolved callback base URL from FileURL: %s", base)
+            return base
+        except Exception:
+            return self._settings.external_api_base_url or None
+
     async def _send_esign_document_prepared(
         self,
         document,
@@ -773,9 +818,9 @@ class IntegrationService:
         import base64
         import httpx
 
-        base_url = self._settings.external_api_base_url
+        base_url = await self._get_esign_base_url(esign_request_id)
         if not base_url:
-            logger.warning("EXTERNAL_API_BASE_URL not set – skipping ProcessESignDocumentPrepared")
+            logger.warning("No callback base URL available – skipping ProcessESignDocumentPrepared")
             return False
 
         if pdf_path is None:
@@ -806,9 +851,9 @@ class IntegrationService:
         """POST completion status to CpaDesk ProcessESignCompletion endpoint."""
         import httpx
 
-        base_url = self._settings.external_api_base_url
+        base_url = await self._get_esign_base_url(esign_request_id)
         if not base_url:
-            logger.warning("EXTERNAL_API_BASE_URL not set – skipping ProcessESignCompletion")
+            logger.warning("No callback base URL available – skipping ProcessESignCompletion")
             return False
 
         try:

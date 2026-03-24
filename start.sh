@@ -13,5 +13,5 @@ until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" >/dev/null 2>&1; do
 done
 
 alembic upgrade head
-python scripts/seed_demo.py
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+LOG_LEVEL="${LOG_LEVEL:-warning}"
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level "$LOG_LEVEL" --workers 1

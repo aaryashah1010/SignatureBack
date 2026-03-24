@@ -82,12 +82,10 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
                    l.RoleID,
                    l.Token,
                    CASE
-                       WHEN c.CPAID IS NOT NULL THEN 'ADMIN'
+                       WHEN l.RoleID IN (1, 2, 3) THEN 'ADMIN'
                        ELSE 'SIGNER'
                    END AS ResolvedRole
             FROM   LoginDetail l
-            LEFT JOIN CPAUser c ON c.LoginDetailID = l.LoginDetailID
-                                AND c.IsActive = 1
             WHERE  l.LoginDetailID = :id
             """,
             {"id": login_detail_id},
@@ -95,6 +93,7 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
         if rows:
             return self._row_to_entity(rows[0])
 
+        # Second try: Client table by ClientID (signers don't have LoginDetail records)
         # Second try: Client table by ClientID (signers don't have LoginDetail records)
         client_rows = await self._client.execute_query(
             """
@@ -117,6 +116,33 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
             return self._row_to_entity(client_rows[0])
 
         logger.debug("No user found for id=%s in LoginDetail or Client", external_user_id)
+        return None
+
+    async def get_client_by_id(self, client_id: str) -> ExternalUserEntity | None:
+        """Look up a signer directly from Client table — avoids conflict when ClientID == LoginDetailID."""
+        try:
+            cid = int(client_id)
+        except ValueError:
+            return None
+        rows = await self._client.execute_query(
+            """
+            SELECT TOP 1
+                   cl.ClientID  AS LoginDetailID,
+                   cl.Email     AS UserName,
+                   cl.FirstName,
+                   cl.LastName,
+                   cl.Email,
+                   4            AS RoleID,
+                   NULL         AS Token,
+                   'SIGNER'     AS ResolvedRole
+            FROM   Client cl
+            WHERE  cl.ClientID = :id
+              AND  cl.IsActive = 1
+            """,
+            {"id": cid},
+        )
+        if rows:
+            return self._row_to_entity(rows[0])
         return None
 
     async def get_user_by_username(self, username: str) -> ExternalUserEntity | None:
@@ -209,6 +235,7 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
             WHERE  m.LoginDetailID = :admin_id
               AND  m.IsActive  = 1
               AND  cl.IsActive = 1
+            ORDER BY cl.FirstName, cl.LastName
             """,
             {"admin_id": admin_login_detail_id},
         )
@@ -317,6 +344,9 @@ class NullExternalUserRepository(ExternalUserRepository):
 
     async def get_user_by_username(self, username: str) -> ExternalUserEntity | None:
         logger.warning("SQL Server not configured – cannot resolve username %s", username)
+        return None
+
+    async def get_client_by_id(self, client_id: str) -> ExternalUserEntity | None:  # noqa: ARG002
         return None
 
     async def get_login_detail_id_by_email(self, _email: str) -> int | None:

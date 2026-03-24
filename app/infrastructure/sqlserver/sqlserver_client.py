@@ -49,7 +49,8 @@ class SqlServerClient:
                 pool_size=5,
                 max_overflow=10,
                 pool_timeout=60,
-                pool_pre_ping=False,  # Skip per-ping; connect lazily on first query
+                pool_pre_ping=True,   # Check connection health before use
+                pool_recycle=300,     # Recycle connections every 5 min to avoid stale pool
                 connect_args={"timeout": 30},  # pyodbc TCP connect timeout (seconds)
             )
             # Do NOT call engine.connect() here — that blocks for the full TCP
