@@ -1,5 +1,5 @@
 """
-Quick test script to generate a JWT and open the /launch endpoint.
+Quick test script to generate a JWT and open the /lof endpoint.
 
 Usage:
     python test_launch.py              # ESign flow (default)
@@ -16,7 +16,7 @@ from jose import jwt
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Must match INTEGRATION_SHARED_SECRET in your .env
-SHARED_SECRET = "test-secret-123"
+SHARED_SECRET = "ZXNpZ24ubXljcGFkZXNrLmNvbUAyMDI2"
 
 # Your running frontend URL
 FRONTEND_URL = "http://localhost:5173"
@@ -59,5 +59,5 @@ else:
 
 token = jwt.encode(payload, SHARED_SECRET, algorithm="HS256")
 
-print(f"\nOpen this URL in your browser:\n{FRONTEND_URL}/launch?token={token}\n")
+print(f"\nOpen this URL in your browser:\n{FRONTEND_URL}/lof?token={token}\n")
 print("Note: each token is single-use. Run the script again for a new token.\n")

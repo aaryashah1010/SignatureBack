@@ -2,9 +2,12 @@
 Integration router – thin controller; all business logic lives in IntegrationService.
 
 Endpoints:
-    POST /integration/launch
-        Validates a signed launch token from the external software, auto-logs
+    GET  /integration/launch
+        Validates a signed launch token from query params, auto-logs
         in the user, bootstraps the document, and returns a JWT + redirect route.
+
+    POST /integration/launch
+        Backward-compatible token exchange endpoint (JSON body).
 
     GET  /integration/documents/{document_id}/mapped-signers
         Returns only the signers that the current admin is allowed to assign
@@ -21,7 +24,7 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
@@ -129,27 +132,16 @@ def get_integration_service(
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.post("/launch", response_model=LaunchResponse, status_code=status.HTTP_200_OK)
-async def launch(
-    payload: LaunchRequest,
-    service=Depends(get_integration_service),
-) -> LaunchResponse:
-    """Exchange a signed launch token for an internal JWT session.
-
-    The external software generates a short-lived HMAC-HS256 token and either
-    posts it here directly or has the user's browser relay it via the /launch
-    frontend route.
-
-    Returns the JWT and the `next_route` the frontend should navigate to.
-    """
-    ctx = await service.validate_launch_token(payload.token)
+async def _exchange_launch_token(raw_token: str, service) -> LaunchResponse:
+    """Shared launch flow used by both GET and POST endpoints."""
+    ctx = await service.validate_launch_token(raw_token)
     local_user = await service.resolve_or_create_local_user(ctx)
 
     document = None
     if ctx.role == "ADMIN":
         document = await service.bootstrap_external_document(ctx, local_user.id)
     elif ctx.role == "SIGNER":
-        # Admin may have already bootstrapped this document — find it by external ID.
+        # Admin may have already bootstrapped this document â€” find it by external ID.
         document = await service._doc_repo.get_by_external_document_id(ctx.external_document_id)
 
     # Issue internal JWT carrying the standard claims.
@@ -181,6 +173,32 @@ async def launch(
             created_at=local_user.created_at,
         ),
     )
+
+
+@router.post("/launch", response_model=LaunchResponse, status_code=status.HTTP_200_OK)
+async def launch(
+    payload: LaunchRequest,
+    service=Depends(get_integration_service),
+) -> LaunchResponse:
+    """Exchange a signed launch token for an internal JWT session.
+
+    The external software generates a short-lived HMAC-HS256 token and posts it here.
+
+    Returns the JWT and the `next_route` the frontend should navigate to.
+    """
+    return await _exchange_launch_token(payload.token, service)
+
+
+@router.get("/launch", response_model=LaunchResponse, status_code=status.HTTP_200_OK)
+async def launch_get(
+    token: Annotated[
+        str,
+        Query(min_length=10, description="HMAC-signed JWT from the external software"),
+    ],
+    service=Depends(get_integration_service),
+) -> LaunchResponse:
+    """Exchange a signed launch token passed as a query parameter."""
+    return await _exchange_launch_token(token, service)
 
 
 @router.get(
