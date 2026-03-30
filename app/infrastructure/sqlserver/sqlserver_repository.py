@@ -265,6 +265,26 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
         )
         return rows[0] if rows else None
 
+    async def get_esign_request_by_guid(self, guid: str) -> dict | None:
+        """Fetch ESignRequests row by EsignRequestGuid (used as the new launch token)."""
+        rows = await self._client.execute_query(
+            """
+            SELECT TOP 1
+                   ESignRequestID, EsignGuid, EsignToken,
+                   FileID, FileName, CPAID, CPAFirmName,
+                   ClientID, ClientLoginDetailID, ClientName, ClientEmail,
+                   AssignedByLoginID, AssignedByLoginUser, FileURL, Status,
+                   RequestedOn, AssignedRole, AssignedRoleID,
+                   SignedOn, ExpiredOn, CreatedBy, CreatedOn, IsActive, IsDeleted
+            FROM   ESignRequests
+            WHERE  EsignGuid = :guid
+              AND  IsActive  = 1
+              AND  IsDeleted = 0
+            """,
+            {"guid": guid},
+        )
+        return rows[0] if rows else None
+
     # ── Document catalogue ────────────────────────────────────────────────────
 
     async def update_document_master_path(self, document_guid: str, new_path: str) -> bool:
@@ -367,4 +387,8 @@ class NullExternalUserRepository(ExternalUserRepository):
 
     async def get_esign_request(self, _esign_request_id: int) -> dict | None:
         logger.warning("SQL Server not configured – cannot fetch ESignRequest")
+        return None
+
+    async def get_esign_request_by_guid(self, guid: str) -> dict | None:  # noqa: ARG002
+        logger.warning("SQL Server not configured – cannot fetch ESignRequest by guid")
         return None

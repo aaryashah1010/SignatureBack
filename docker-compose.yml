@@ -57,6 +57,7 @@ services:
       # ── Integration (fill in your values) ──────────────────────────────────
       SQLSERVER_URL: "mssql+pyodbc://sa:Newtech%40%231010@69.30.224.78:9759/cpadesk_phase2?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes"
       INTEGRATION_SHARED_SECRET: "ZXNpZ24ubXljcGFkZXNrLmNvbUAyMDI2"
+      INTEGRATION_VERIFY_EXP: "false"
       EXTERNAL_API_BASE_URL: ""
       EXTERNAL_API_AUTH_SECRET: ""
       DOCUMENT_BASE_PATH: ""

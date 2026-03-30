@@ -96,9 +96,10 @@ class SignDocumentRequest(BaseModel):
 
 
 class LaunchRequest(BaseModel):
-    """Raw launch token posted by the external software (or relayed by the frontend)."""
+    """EsignGuid + role posted by the external software."""
 
-    token: str = Field(min_length=10, description="HMAC-signed JWT from the external software")
+    token: str = Field(min_length=10, description="EsignRequestGuid from ESignRequests table")
+    role: str = Field(default="", description="Role sent by CpaDesk e.g. CpaAdmin, CpaClient")
 
 
 class LaunchResponse(BaseModel):

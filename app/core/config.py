@@ -37,14 +37,8 @@ class Settings(BaseSettings):
     # Shared secret for authenticating outbound callback POST requests.
     external_api_auth_secret: str = Field(default="")
 
-    # HMAC-HS256 secret used to validate signed launch tokens from the external software.
-    integration_shared_secret: str = Field(default="change-integration-secret-in-production")
-
-    # Maximum lifetime of a launch token in minutes (short-lived by design).
-    launch_token_expire_minutes: int = Field(default=15)
-
-    # How long used nonces are remembered in Redis to block replay attacks.
-    nonce_ttl_seconds: int = Field(default=900)
+    # 3DES decryption key for EsignToken is hardcoded in integration_service.py (_ESIGN_SECRET).
+    # No shared secret or nonce config needed for the EsignGuid-based launch flow.
 
     # Optional path-prefix allowlist for external document files (empty = disabled).
     allowed_document_path_prefixes: list[str] = Field(default_factory=list)

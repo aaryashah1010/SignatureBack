@@ -90,6 +90,11 @@ class ExternalUserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_esign_request_by_guid(self, guid: str) -> dict | None:
+        """Fetch ESignRequests row by EsignRequestGuid (includes EsignToken for verification)."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_document_path_by_guid(self, document_guid: str) -> str | None:
         """Return DocumentMaster.PhysicalRelativePath for the given DocumentGUID.
 

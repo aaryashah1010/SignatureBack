@@ -132,9 +132,9 @@ def get_integration_service(
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-async def _exchange_launch_token(raw_token: str, service) -> LaunchResponse:
+async def _exchange_launch_token(raw_token: str, service, raw_role: str = "") -> LaunchResponse:
     """Shared launch flow used by both GET and POST endpoints."""
-    ctx = await service.validate_launch_token(raw_token)
+    ctx = await service.validate_launch_token(raw_token, raw_role)
     local_user = await service.resolve_or_create_local_user(ctx)
 
     document = None
@@ -180,25 +180,18 @@ async def launch(
     payload: LaunchRequest,
     service=Depends(get_integration_service),
 ) -> LaunchResponse:
-    """Exchange a signed launch token for an internal JWT session.
-
-    The external software generates a short-lived HMAC-HS256 token and posts it here.
-
-    Returns the JWT and the `next_route` the frontend should navigate to.
-    """
-    return await _exchange_launch_token(payload.token, service)
+    """Exchange an EsignGuid + role for an internal JWT session."""
+    return await _exchange_launch_token(payload.token, service, payload.role)
 
 
 @router.get("/launch", response_model=LaunchResponse, status_code=status.HTTP_200_OK)
 async def launch_get(
-    token: Annotated[
-        str,
-        Query(min_length=10, description="HMAC-signed JWT from the external software"),
-    ],
+    token: Annotated[str, Query(min_length=10, description="EsignRequestGuid from ESignRequests")],
+    role: Annotated[str, Query(description="Role sent by CpaDesk e.g. CpaAdmin, CpaClient")],
     service=Depends(get_integration_service),
 ) -> LaunchResponse:
-    """Exchange a signed launch token passed as a query parameter."""
-    return await _exchange_launch_token(token, service)
+    """Exchange an EsignGuid + role passed as query parameters."""
+    return await _exchange_launch_token(token, service, role)
 
 
 @router.get(

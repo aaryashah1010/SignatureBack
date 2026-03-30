@@ -20,7 +20,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
-from jose import JWTError, jwt
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -48,11 +48,28 @@ logger = logging.getLogger(__name__)
 # Matches the C# EncryptDecryptValue class used by CpaDesk.
 
 _CPADEST_SECRET = "CPADesk@2023"
+_ESIGN_SECRET   = "ZXNpZ24ubXljcGFkZXNrLmNvbUAyMDI2"
 
 
-def _tdes_key() -> bytes:
+def _tdes_key(secret: str = _CPADEST_SECRET) -> bytes:
     import hashlib
-    return hashlib.sha256(_CPADEST_SECRET.encode("utf-8")).digest()[:24]
+    return hashlib.sha256(secret.encode("utf-8")).digest()[:24]
+
+
+def _decrypt_esign_token(encrypted: str) -> str:
+    """Decrypt ESignRequests.EsignToken using the ESign 3DES key.
+
+    Mirrors the C# Decrypt() method that uses commentKey = _ESIGN_SECRET.
+    Returns the decrypted plaintext, or raises ValueError on failure.
+    """
+    import base64
+    from Crypto.Cipher import DES3
+
+    data = base64.b64decode(encrypted)
+    cipher = DES3.new(_tdes_key(_ESIGN_SECRET), DES3.MODE_ECB)
+    decrypted = cipher.decrypt(data)
+    pad_len = decrypted[-1]
+    return decrypted[:-pad_len].decode("utf-8")
 
 
 def decrypt_path(encrypted_path: str, _decryption_key: str = "") -> str:
@@ -145,135 +162,56 @@ class IntegrationService:
     # 1. Launch token validation
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def validate_launch_token(self, raw_token: str) -> LaunchContextEntity:
-        """Verify the HMAC-HS256 signed launch token produced by the external software.
+    async def validate_launch_token(self, esign_request_guid: str, raw_role: str = "") -> LaunchContextEntity:
+        """Validate a launch request using EsignRequestGuid.
 
-        Supports two token formats:
-        A) ESign flow (new):  { eSignRequestId, token, role, jti, exp }
-        B) Legacy flow (old): { sub, file_id, document_path, token, role, jti, exp }
+        New flow (replaces JWT-based launch):
+        1. Receive EsignRequestGuid as the 'token' query/body param.
+        2. Fetch ESignRequests row by EsignRequestGuid from SQL Server.
+        3. Decrypt EsignToken (3DES-ECB) and verify it matches the incoming guid.
+        4. Build LaunchContextEntity from the row — role, user IDs, file path, etc.
 
-        Security guarantees:
-        - Signature & expiry verified via python-jose.
-        - jti (nonce) consumed in Redis; duplicate tokens are rejected.
-        - For the ESign flow, LoginDetail.Token is verified against SQL Server.
+        No JWT, no nonce, no shared-secret needed.
         """
-        try:
-            payload = jwt.decode(
-                raw_token,
-                self._settings.integration_shared_secret,
-                algorithms=["HS256"],
-                options={"verify_exp": True},
-            )
-        except JWTError as exc:
-            await self._audit("LAUNCH_TOKEN_INVALID", success=False, details=str(exc))
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired launch token",
-            ) from exc
-
-        jti: str | None = payload.get("jti")
-        exp: int | None = payload.get("exp")
-        login_token: str = payload.get("token") or ""
-        raw_role: str = (payload.get("role") or "").strip()
-        role = _normalise_role(raw_role)
-
-        if not jti:
-            await self._audit("LAUNCH_TOKEN_MALFORMED", success=False)
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                                detail="Launch token missing jti claim")
-
-        # Nonce check – one-time-use enforcement via Redis TTL
-        nonce_key = f"launch_nonce:{jti}"
-        if await self._event_bus.get_json(nonce_key):
-            await self._audit("LAUNCH_NONCE_REUSED", success=False)
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                                detail="Launch token has already been used")
-        await self._event_bus.set_json(
-            nonce_key, {"used": True}, ttl_seconds=self._settings.nonce_ttl_seconds
-        )
-
-        expires_at = datetime.fromtimestamp(exp, tz=UTC) if exp else datetime.now(UTC)
-
-        # ── A) New ESign flow: token carries eSignRequestId ───────────────────
-        esign_request_id: int | None = payload.get("eSignRequestId")
-        if esign_request_id is not None:
-            return await self._validate_esign_token(
-                esign_request_id=int(esign_request_id),
-                login_token=login_token,
-                jti=jti,
-                expires_at=expires_at,
-            )
-
-        # ── B) Legacy flow: token carries sub + file_id ───────────────────────
-        external_user_id: str | None = payload.get("sub")
-        external_document_id: str | None = (
-            payload.get("file_id")
-            or payload.get("document_guid")
-            or payload.get("external_document_id")
-        )
-        document_path: str = payload.get("document_path") or ""
-        decryption_key: str = payload.get("decryption_key") or ""
-        tenant_id: str | None = payload.get("tenant_id")
-
-        if not all([external_user_id, external_document_id]):
-            await self._audit("LAUNCH_TOKEN_MALFORMED", success=False)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Launch token is missing required claims (sub / file_id / jti)",
-            )
-
-        if role not in ("ADMIN", "SIGNER"):
-            await self._audit("LAUNCH_TOKEN_BAD_ROLE", success=False,
-                              details=f"raw_role={raw_role}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                                detail=f"Unrecognised role '{raw_role}'")
-
-        await self._audit("LAUNCH_TOKEN_VALID", external_user_id=external_user_id)
-        return LaunchContextEntity(
-            external_user_id=external_user_id,
-            role=role,
-            external_document_id=external_document_id,
-            document_path=document_path,
-            decryption_key=decryption_key,
-            login_token=login_token,
-            tenant_id=tenant_id,
-            jti=jti,
-            expires_at=expires_at,
-        )
-
-    async def _validate_esign_token(
-        self,
-        esign_request_id: int,
-        login_token: str,
-        jti: str,
-        expires_at: datetime,
-    ) -> LaunchContextEntity:
-        """Validate the new ESign-flow token using the ESignRequests table.
-
-        Role is NOT taken from the JWT — it is read from ESignRequests.AssignedRole
-        so the JWT only needs: eSignRequestId, token, jti, exp.
-
-        Steps:
-        1. Fetch ESignRequests row by esign_request_id.
-        2. Determine role from AssignedRole (CpaUser → ADMIN, CpaClient → SIGNER).
-        3. Verify login_token == LoginDetail.Token for the appropriate LoginDetailID.
-        4. Return LaunchContextEntity with all ESign fields populated.
-        """
-        esign_row = await self._ext_user_repo.get_esign_request(esign_request_id)
+        # 1. Fetch row by guid
+        esign_row = await self._ext_user_repo.get_esign_request_by_guid(esign_request_guid)
         if not esign_row:
-            await self._audit("ESIGN_REQUEST_NOT_FOUND", success=False,
-                              details=f"esign_request_id={esign_request_id}")
+            await self._audit("ESIGN_GUID_NOT_FOUND", success=False,
+                              details=f"guid={esign_request_guid}")
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                                 detail="ESign request not found or inactive")
 
-        assigned_role: str = (esign_row.get("AssignedRole") or "").strip()
+        # 2. Decrypt EsignToken and compare with incoming guid
+        esign_token_enc: str = esign_row.get("EsignToken") or ""
+        if not esign_token_enc:
+            await self._audit("ESIGN_TOKEN_MISSING", success=False,
+                              details=f"guid={esign_request_guid}")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="ESign token not set for this request")
+
+        try:
+            decrypted_guid = _decrypt_esign_token(esign_token_enc)
+        except Exception as exc:
+            await self._audit("ESIGN_TOKEN_DECRYPT_FAILED", success=False, details=str(exc))
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="ESign token could not be decrypted") from exc
+
+        if decrypted_guid.strip() != esign_request_guid.strip():
+            await self._audit("ESIGN_TOKEN_MISMATCH", success=False,
+                              details=f"guid={esign_request_guid}")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="ESign token does not match request guid")
+
+        # 3. Build context from the row
+        esign_request_id: int = esign_row["ESignRequestID"]
+        # Role: prefer the param sent by CpaDesk; fall back to DB AssignedRole
+        assigned_role: str = raw_role.strip() or (esign_row.get("AssignedRole") or "").strip()
         role = _normalise_role(assigned_role)
 
         if role not in ("ADMIN", "SIGNER"):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                                 detail=f"Unrecognised AssignedRole '{assigned_role}' in ESignRequests")
 
-        # Determine which LoginDetailID to verify token against
         if role == "ADMIN":
             verify_login_id: int | None = esign_row.get("AssignedByLoginID")
         else:
@@ -281,30 +219,12 @@ class IntegrationService:
 
         if not verify_login_id:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                                detail="ESign request has no valid login ID for verification")
+                                detail="ESign request has no valid login ID")
 
-        # Fetch LoginDetail to verify token
-        ext_user = await self._ext_user_repo.get_user_by_external_id(str(verify_login_id))
-        if not ext_user:
-            await self._audit("ESIGN_LOGIN_NOT_FOUND", success=False,
-                              details=f"login_detail_id={verify_login_id}")
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                                detail="Login record not found for ESign request")
-
-        # Verify token (only when both sides have a value)
-        if login_token and ext_user.login_token:
-            if login_token != ext_user.login_token:
-                await self._audit("ESIGN_TOKEN_MISMATCH", success=False,
-                                  details=f"login_detail_id={verify_login_id}")
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                                    detail="Token does not match user record")
-
-        # external_document_id = ESignRequestID (used for idempotency in bootstrap)
-        external_document_id = str(esign_request_id)
-        # FileURL from ESignRequests is encrypted with the same 3DES key
         document_path: str = esign_row.get("FileURL") or ""
+        external_document_id = str(esign_request_id)
 
-        await self._audit("ESIGN_TOKEN_VALID",
+        await self._audit("ESIGN_GUID_VALID",
                           external_user_id=str(verify_login_id),
                           external_document_id=external_document_id)
 
@@ -313,10 +233,10 @@ class IntegrationService:
             role=role,
             external_document_id=external_document_id,
             document_path=document_path,
-            login_token=login_token,
+            login_token="",
             tenant_id=None,
-            jti=jti,
-            expires_at=expires_at,
+            jti=esign_request_guid,
+            expires_at=datetime.now(UTC),
             esign_request_id=esign_request_id,
             esign_client_id=esign_row.get("ClientID"),
             esign_client_login_detail_id=esign_row.get("ClientLoginDetailID"),
