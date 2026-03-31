@@ -22,9 +22,11 @@ Endpoints:
 
 import logging
 from typing import Annotated
+from urllib.parse import urlencode
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
@@ -186,11 +188,24 @@ async def launch(
 
 @router.get("/launch", response_model=LaunchResponse, status_code=status.HTTP_200_OK)
 async def launch_get(
+    request: Request,
     token: Annotated[str, Query(min_length=10, description="EsignRequestGuid from ESignRequests")],
     role: Annotated[str, Query(description="Role sent by CpaDesk e.g. CpaAdmin, CpaClient")],
     service=Depends(get_integration_service),
-) -> LaunchResponse:
+) -> LaunchResponse | RedirectResponse:
     """Exchange an EsignGuid + role passed as query parameters."""
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        # Browser fallback: direct opens of /api/integration/launch should land on
+        # frontend /launch, which will call this API and route using next_route.
+        params = {"token": token}
+        if role:
+            params["role"] = role
+        return RedirectResponse(
+            url=f"/launch?{urlencode(params)}",
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        )
+
     return await _exchange_launch_token(token, service, role)
 
 

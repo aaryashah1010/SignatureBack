@@ -633,7 +633,7 @@ class IntegrationService:
             external_user_id=signer_external_user_id,
             document_id=document_id,
             external_document_id=external_doc_id,
-            details=f"signed={assigned_signed}/{assigned_total} writeback={writeback_ok}",
+            details=f"signed={assigned_signed}/{assigned_total} callback_triggered={callback_triggered}",
         )
         await self._session.commit()
 
