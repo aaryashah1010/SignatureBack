@@ -592,7 +592,7 @@ class IntegrationService:
             external_doc_id and signer_external_user_id and self._callback_client
         )
 
-        # ── Send signed PDF + completion callbacks to CpaDesk ────────────────
+        # ── ESign submit callback to CpaDesk ──────────────────────────────────
         esign_request_id: int | None = None
         try:
             esign_request_id = int(external_doc_id) if external_doc_id else None
@@ -616,14 +616,11 @@ class IntegrationService:
 
         import asyncio as _asyncio
         if esign_request_id:
-            t1 = _asyncio.create_task(self._send_esign_document_prepared(
-                document=document,
-                esign_request_id=esign_request_id,
-                status="Completed",
-            ))
-            t1.add_done_callback(_log_task_error)
-            t2 = _asyncio.create_task(self._send_esign_completion(esign_request_id=esign_request_id))
-            t2.add_done_callback(_log_task_error)
+            # Required flow:
+            # - Admin region-save -> ProcessESignDocumentPrepared (already sent by notify_document_prepared)
+            # - Signer submit     -> ProcessESignCompletion
+            t = _asyncio.create_task(self._send_esign_completion(esign_request_id=esign_request_id))
+            t.add_done_callback(_log_task_error)
         else:
             t = _asyncio.create_task(self._writeback_signed_pdf(document))
             t.add_done_callback(_log_task_error)
