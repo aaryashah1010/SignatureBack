@@ -619,7 +619,7 @@ class IntegrationService:
             # Required flow:
             # - Admin region-save -> ProcessESignDocumentPrepared (already sent by notify_document_prepared)
             # - Signer submit     -> ProcessESignCompletion
-            t = _asyncio.create_task(self._send_esign_completion(esign_request_id=esign_request_id))
+            t = _asyncio.create_task(self._send_esign_completion(esign_request_id=esign_request_id, document=document))
             t.add_done_callback(_log_task_error)
         else:
             t = _asyncio.create_task(self._writeback_signed_pdf(document))
@@ -764,8 +764,9 @@ class IntegrationService:
             logger.error("ProcessESignDocumentPrepared failed for ESignRequestID=%s: %s", esign_request_id, exc)
             return False
 
-    async def _send_esign_completion(self, esign_request_id: int) -> bool:
-        """POST completion status to CpaDesk ProcessESignCompletion endpoint."""
+    async def _send_esign_completion(self, esign_request_id: int, document=None) -> bool:
+        """POST signed PDF bytes to CpaDesk ProcessESignCompletion endpoint."""
+        import base64
         import httpx
 
         base_url = await self._get_esign_base_url(esign_request_id)
@@ -773,12 +774,22 @@ class IntegrationService:
             logger.warning("No callback base URL available – skipping ProcessESignCompletion")
             return False
 
+        # Read signed PDF bytes
+        pdf_bytes_b64 = None
+        if document and document.final_path:
+            try:
+                pdf_bytes = Path(document.final_path).read_bytes()
+                pdf_bytes_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+            except Exception as exc:
+                logger.warning("Could not read signed PDF for completion callback: %s", exc)
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(
                     f"{base_url.rstrip('/')}/api/ESign/ProcessESignCompletion",
                     json={
                         "ESignRequestID": esign_request_id,
+                        "FileBytes": pdf_bytes_b64,
                     },
                 )
                 response.raise_for_status()
