@@ -108,6 +108,43 @@ class SignaturePdfService:
         with target_pdf.open("wb") as file_obj:
             writer.write(file_obj)
 
+    def render_region_boxes(
+        self,
+        source_pdf: Path,
+        target_pdf: Path,
+        boxes: list[SignatureBox],
+    ) -> None:
+        """Draw empty dashed signature boxes on the PDF (for admin-prepared callback)."""
+        reader = PdfReader(str(source_pdf))
+        writer = PdfWriter()
+
+        for page_idx, source_page in enumerate(reader.pages):
+            page_width = float(source_page.mediabox.width)
+            page_height = float(source_page.mediabox.height)
+
+            page_boxes = [b for b in boxes if b.page_number - 1 == page_idx]
+            if page_boxes:
+                overlay_stream = io.BytesIO()
+                c = canvas.Canvas(overlay_stream, pagesize=(page_width, page_height))
+                c.setStrokeColorRGB(0.2, 0.4, 0.8)
+                c.setLineWidth(1.5)
+                c.setDash(4, 3)
+                for box in page_boxes:
+                    bx = box.x * page_width
+                    bw = box.width * page_width
+                    bh = box.height * page_height
+                    by = page_height - ((box.y + box.height) * page_height)
+                    c.rect(bx, by, bw, bh, stroke=1, fill=0)
+                c.save()
+                overlay_stream.seek(0)
+                overlay_reader = PdfReader(overlay_stream)
+                source_page.merge_page(overlay_reader.pages[0])
+
+            writer.add_page(source_page)
+
+        with target_pdf.open("wb") as f:
+            writer.write(f)
+
     def _prepare_overlay_png(self, signature_bytes: bytes, box_width: float, box_height: float) -> bytes:
         render_scale = 3
         render_width = max(1, int(round(box_width * render_scale)))

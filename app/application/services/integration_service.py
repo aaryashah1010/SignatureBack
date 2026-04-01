@@ -688,12 +688,27 @@ class IntegrationService:
             logger.debug("notify_document_prepared: not an ESign document (%s)", document_id)
             return False
 
+        # Render region boxes onto original PDF so CpaDesk sees where signatures will go
+        from app.infrastructure.pdf_engine.signature_pdf_service import SignaturePdfService
+        from uuid import uuid4 as _uuid4
+
         original_path = Path(document.original_path) if document.original_path else None
+        prepared_path = original_path  # fallback: plain original
+
+        if original_path and original_path.exists() and document.regions:
+            try:
+                boxes = [r.box for r in document.regions]
+                prepared_pdf = self._settings.original_storage_dir / f"prepared_{document.id}_{_uuid4()}.pdf"
+                SignaturePdfService().render_region_boxes(original_path, prepared_pdf, boxes)
+                prepared_path = prepared_pdf
+            except Exception as exc:
+                logger.warning("Could not render region boxes for prepared PDF: %s", exc)
+
         return await self._send_esign_document_prepared(
             document=document,
             esign_request_id=esign_request_id,
             status="Pending",
-            pdf_path=original_path,
+            pdf_path=prepared_path,
         )
 
     async def _get_esign_base_url(self, esign_request_id: int) -> str | None:
