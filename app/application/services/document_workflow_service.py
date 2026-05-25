@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.domain.entities.annotation import AnnotationEntity, AnnotationKind
 from app.domain.entities.document import DocumentEntity
 from app.domain.entities.enums import DocumentStatus, SignatureMethod, UserRole
 from app.domain.entities.signature_region import SignatureRegionEntity
@@ -193,6 +194,7 @@ class DocumentWorkflowService:
             source_pdf=Path(document.original_path),
             target_pdf=target_pdf,
             signatures=all_signatures,
+            annotations=document.annotations,
         )
 
         signed_at = datetime.now(UTC)
@@ -224,6 +226,121 @@ class DocumentWorkflowService:
         await self.event_bus.publish("workflow.events", {"type": "region_signed", "document_id": str(document_id)})
         return updated_document
 
+    async def create_annotations(
+        self,
+        admin_id: UUID,
+        document_id: UUID,
+        annotation_payloads: list[dict],
+        request_ip: str,
+        user_agent: str,
+    ) -> list[AnnotationEntity]:
+        document = await self.document_repository.get_document_by_id(document_id)
+        if not document:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+        if document.uploaded_by != admin_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not owner of this document")
+
+        prepared: list[dict] = []
+        for item in annotation_payloads:
+            try:
+                kind = AnnotationKind(item["kind"])
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid annotation kind") from exc
+
+            page_number = int(item["page_number"])
+            if page_number < 1 or page_number > document.total_pages:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="page_number out of range")
+
+            x = float(item["x"])
+            y = float(item["y"])
+            width = float(item["width"])
+            height = float(item["height"])
+            if not (0 <= x <= 1 and 0 <= y <= 1):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="x and y must be in [0, 1]")
+            if width <= 0 or height <= 0:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="width and height must be > 0")
+            if x + width > 1.0001 or y + height > 1.0001:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="annotation exceeds page bounds")
+
+            prepared.append(
+                {
+                    "page_number": page_number,
+                    "kind": kind.value,
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                    "color": (item.get("color") or "#fde047")[:20],
+                    "text": item.get("text") or "",
+                    "paths": item.get("paths") or "",
+                }
+            )
+
+        annotations = await self.document_repository.create_annotations(
+            document_id=document_id,
+            created_by=admin_id,
+            annotations=prepared,
+        )
+        await self.session.commit()
+
+        await self.audit_repository.create_log(
+            document_id=document_id,
+            user_id=admin_id,
+            action="ANNOTATIONS_ADDED",
+            ip_address=request_ip,
+            user_agent=user_agent,
+        )
+        await self.session.commit()
+
+        # Keep the downloadable signed PDF in sync if any signature has already been applied.
+        await self._rebuild_final_pdf_if_signed(document_id)
+
+        # Bust signer pending caches because the document state (annotations) changed.
+        for region in document.regions:
+            await self.event_bus.invalidate_key(f"pending_documents:{region.assigned_to}")
+        return annotations
+
+    async def list_annotations(self, document_id: UUID, requester_id: UUID, role: UserRole) -> list[AnnotationEntity]:
+        # Reuse the access check from get_document_for_user.
+        await self.get_document_for_user(document_id=document_id, requester_id=requester_id, role=role)
+        return await self.document_repository.list_annotations(document_id)
+
+    async def delete_annotation(
+        self,
+        admin_id: UUID,
+        document_id: UUID,
+        annotation_id: UUID,
+        request_ip: str,
+        user_agent: str,
+    ) -> None:
+        document = await self.document_repository.get_document_by_id(document_id)
+        if not document:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+        if document.uploaded_by != admin_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not owner of this document")
+
+        annotation = await self.document_repository.get_annotation_by_id(annotation_id)
+        if not annotation or annotation.document_id != document_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Annotation not found")
+
+        await self.document_repository.delete_annotation(annotation_id)
+        await self.session.commit()
+
+        await self.audit_repository.create_log(
+            document_id=document_id,
+            user_id=admin_id,
+            action="ANNOTATION_DELETED",
+            ip_address=request_ip,
+            user_agent=user_agent,
+        )
+        await self.session.commit()
+
+        # Keep the downloadable signed PDF in sync if any signature has already been applied.
+        await self._rebuild_final_pdf_if_signed(document_id)
+
+        for region in document.regions:
+            await self.event_bus.invalidate_key(f"pending_documents:{region.assigned_to}")
+
     def _collect_signatures_for_render(
         self,
         document: DocumentEntity,
@@ -246,6 +363,46 @@ class DocumentWorkflowService:
 
         signatures.sort(key=lambda item: (item[0].page_number, item[0].y, item[0].x))
         return signatures
+
+    def _collect_existing_signatures(self, document: DocumentEntity) -> list[tuple[SignatureBox, bytes]]:
+        signatures: list[tuple[SignatureBox, bytes]] = []
+        for region in document.regions:
+            if not region.signed or not region.signature_image_path:
+                continue
+            image_path = Path(region.signature_image_path)
+            if image_path.exists():
+                signatures.append((region.box, image_path.read_bytes()))
+        signatures.sort(key=lambda item: (item[0].page_number, item[0].y, item[0].x))
+        return signatures
+
+    async def _rebuild_final_pdf_if_signed(self, document_id: UUID) -> None:
+        """Re-render the signed PDF from the original when annotations change on a partially/fully signed doc.
+
+        Without this, annotations added (or removed) after the first signature would
+        not appear in the downloaded PDF until the next signature event.
+        """
+        document = await self.document_repository.get_document_by_id(document_id)
+        if not document or not document.final_path:
+            return  # Nothing to rebuild — no signatures applied yet.
+
+        existing_signatures = self._collect_existing_signatures(document)
+        if not existing_signatures:
+            return
+
+        target_pdf = self.settings.signed_storage_dir / f"{document.id}_{uuid4()}.pdf"
+        self.pdf_service.apply_signatures(
+            source_pdf=Path(document.original_path),
+            target_pdf=target_pdf,
+            signatures=existing_signatures,
+            annotations=document.annotations,
+        )
+        final_hash = hashlib.sha256(target_pdf.read_bytes()).hexdigest()
+        await self.document_repository.update_document_after_sign(
+            document_id=document_id,
+            final_path=str(target_pdf),
+            final_hash=final_hash,
+        )
+        await self.session.commit()
 
     async def get_download_path_for_admin(self, document_id: UUID, admin_id: UUID) -> Path:
         document = await self.document_repository.get_document_by_id(document_id)

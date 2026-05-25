@@ -5,6 +5,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.domain.entities.annotation import AnnotationEntity, AnnotationKind
 from app.domain.entities.audit_log import AuditLogEntity
 from app.domain.entities.document import DocumentEntity
 from app.domain.entities.enums import DocumentStatus, UserRole
@@ -15,6 +16,7 @@ from app.domain.repositories.document_repository import DocumentRepository
 from app.domain.repositories.user_repository import UserRepository
 from app.domain.value_objects.signature_box import SignatureBox
 from app.infrastructure.persistence.mappers import (
+    map_annotation,
     map_audit_log,
     map_callback_record,
     map_document,
@@ -23,6 +25,7 @@ from app.infrastructure.persistence.mappers import (
     map_user,
 )
 from app.infrastructure.persistence.models import (
+    AnnotationModel,
     AuditLogModel,
     CallbackAuditLogModel,
     DocumentModel,
@@ -91,7 +94,10 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
         result = await self.session.execute(
             select(DocumentModel)
             .where(DocumentModel.id == document_id)
-            .options(selectinload(DocumentModel.signature_regions))
+            .options(
+                selectinload(DocumentModel.signature_regions),
+                selectinload(DocumentModel.annotations),
+            )
         )
         row = result.scalar_one_or_none()
         return map_document(row) if row else None
@@ -101,7 +107,10 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
             select(DocumentModel)
             .where(DocumentModel.uploaded_by == admin_id)
             .order_by(DocumentModel.created_at.desc())
-            .options(selectinload(DocumentModel.signature_regions))
+            .options(
+                selectinload(DocumentModel.signature_regions),
+                selectinload(DocumentModel.annotations),
+            )
         )
         return [map_document(row) for row in result.scalars().all()]
 
@@ -119,7 +128,10 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
                 )
             )
             .order_by(DocumentModel.created_at.desc())
-            .options(selectinload(DocumentModel.signature_regions))
+            .options(
+                selectinload(DocumentModel.signature_regions),
+                selectinload(DocumentModel.annotations),
+            )
             .distinct()
         )
         return [map_document(row) for row in result.scalars().all()]
@@ -175,7 +187,12 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
         final_hash: str,
     ) -> DocumentEntity:
         result = await self.session.execute(
-            select(DocumentModel).where(DocumentModel.id == document_id).options(selectinload(DocumentModel.signature_regions))
+            select(DocumentModel)
+            .where(DocumentModel.id == document_id)
+            .options(
+                selectinload(DocumentModel.signature_regions),
+                selectinload(DocumentModel.annotations),
+            )
         )
         document = result.scalar_one()
         document.final_path = final_path
@@ -199,10 +216,63 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
         result = await self.session.execute(
             select(DocumentModel)
             .where(DocumentModel.external_document_id == external_document_id)
-            .options(selectinload(DocumentModel.signature_regions))
+            .options(
+                selectinload(DocumentModel.signature_regions),
+                selectinload(DocumentModel.annotations),
+            )
         )
         row = result.scalar_one_or_none()
         return map_document(row) if row else None
+
+    async def create_annotations(
+        self,
+        document_id: UUID,
+        created_by: UUID,
+        annotations: list[dict],
+    ) -> list[AnnotationEntity]:
+        created: list[AnnotationModel] = []
+        for item in annotations:
+            model = AnnotationModel(
+                document_id=document_id,
+                page_number=item["page_number"],
+                kind=item["kind"],
+                x=item["x"],
+                y=item["y"],
+                width=item["width"],
+                height=item["height"],
+                color=item.get("color", "#fde047"),
+                text=item.get("text", "") or "",
+                paths=item.get("paths", "") or "",
+                created_by=created_by,
+            )
+            self.session.add(model)
+            created.append(model)
+        await self.session.flush()
+        return [map_annotation(model) for model in created]
+
+    async def list_annotations(self, document_id: UUID) -> list[AnnotationEntity]:
+        result = await self.session.execute(
+            select(AnnotationModel)
+            .where(AnnotationModel.document_id == document_id)
+            .order_by(AnnotationModel.created_at)
+        )
+        return [map_annotation(row) for row in result.scalars().all()]
+
+    async def get_annotation_by_id(self, annotation_id: UUID) -> AnnotationEntity | None:
+        result = await self.session.execute(
+            select(AnnotationModel).where(AnnotationModel.id == annotation_id)
+        )
+        row = result.scalar_one_or_none()
+        return map_annotation(row) if row else None
+
+    async def delete_annotation(self, annotation_id: UUID) -> None:
+        result = await self.session.execute(
+            select(AnnotationModel).where(AnnotationModel.id == annotation_id)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            await self.session.delete(row)
+            await self.session.flush()
 
     async def get_external_document_id(self, document_id: UUID) -> str | None:
         result = await self.session.execute(
@@ -237,6 +307,24 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
                 }
                 for region in document.regions
             ],
+            "annotations": [
+                {
+                    "id": str(annotation.id),
+                    "document_id": str(annotation.document_id),
+                    "page_number": annotation.page_number,
+                    "kind": annotation.kind.value,
+                    "x": annotation.x,
+                    "y": annotation.y,
+                    "width": annotation.width,
+                    "height": annotation.height,
+                    "color": annotation.color,
+                    "text": annotation.text,
+                    "paths": annotation.paths,
+                    "created_by": str(annotation.created_by),
+                    "created_at": annotation.created_at.isoformat(),
+                }
+                for annotation in document.annotations
+            ],
         }
 
     def deserialize_document_from_cache(self, payload: dict) -> DocumentEntity:
@@ -258,6 +346,24 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
             )
             for item in payload["regions"]
         ]
+        annotations = [
+            AnnotationEntity(
+                id=UUID(item["id"]),
+                document_id=UUID(item["document_id"]),
+                page_number=item["page_number"],
+                kind=AnnotationKind(item["kind"]),
+                x=item["x"],
+                y=item["y"],
+                width=item["width"],
+                height=item["height"],
+                color=item["color"],
+                text=item["text"],
+                paths=item["paths"],
+                created_by=UUID(item["created_by"]),
+                created_at=datetime.fromisoformat(item["created_at"]),
+            )
+            for item in payload.get("annotations", [])
+        ]
         return DocumentEntity(
             id=UUID(payload["id"]),
             title=payload["title"],
@@ -269,6 +375,7 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
             status=DocumentStatus(payload["status"]),
             created_at=datetime.fromisoformat(payload["created_at"]),
             regions=regions,
+            annotations=annotations,
         )
 
 

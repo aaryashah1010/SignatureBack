@@ -1,6 +1,7 @@
+from app.domain.entities.annotation import AnnotationEntity
 from app.domain.entities.document import DocumentEntity
 from app.domain.entities.signature_region import SignatureRegionEntity
-from app.presentation.controllers.schemas import DocumentResponse, RegionResponse
+from app.presentation.controllers.schemas import AnnotationResponse, DocumentResponse, RegionResponse
 
 
 def to_region_response(region: SignatureRegionEntity) -> RegionResponse:
@@ -17,6 +18,23 @@ def to_region_response(region: SignatureRegionEntity) -> RegionResponse:
     )
 
 
+def to_annotation_response(annotation: AnnotationEntity) -> AnnotationResponse:
+    return AnnotationResponse(
+        id=annotation.id,
+        page_number=annotation.page_number,
+        kind=annotation.kind.value,
+        x=annotation.x,
+        y=annotation.y,
+        width=annotation.width,
+        height=annotation.height,
+        color=annotation.color,
+        text=annotation.text,
+        paths=annotation.paths,
+        created_by=annotation.created_by,
+        created_at=annotation.created_at,
+    )
+
+
 def to_document_response(document: DocumentEntity) -> DocumentResponse:
     return DocumentResponse(
         id=document.id,
@@ -27,4 +45,5 @@ def to_document_response(document: DocumentEntity) -> DocumentResponse:
         final_hash=document.final_hash,
         created_at=document.created_at,
         regions=[to_region_response(region) for region in document.regions],
+        annotations=[to_annotation_response(annotation) for annotation in document.annotations],
     )

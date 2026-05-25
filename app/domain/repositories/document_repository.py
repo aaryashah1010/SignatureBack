@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from uuid import UUID
 
+from app.domain.entities.annotation import AnnotationEntity
 from app.domain.entities.document import DocumentEntity
 from app.domain.entities.signature_region import SignatureRegionEntity
 from app.domain.value_objects.signature_box import SignatureBox
@@ -76,4 +77,27 @@ class DocumentRepository(ABC):
     @abstractmethod
     async def get_external_document_id(self, document_id: UUID) -> str | None:
         """Return the external_document_id for a local document, or None."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def create_annotations(
+        self,
+        document_id: UUID,
+        created_by: UUID,
+        annotations: list[dict],
+    ) -> list[AnnotationEntity]:
+        """Persist a batch of admin annotations against a document."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_annotations(self, document_id: UUID) -> list[AnnotationEntity]:
+        """Return all annotations stored on a document."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_annotation_by_id(self, annotation_id: UUID) -> AnnotationEntity | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_annotation(self, annotation_id: UUID) -> None:
         raise NotImplementedError

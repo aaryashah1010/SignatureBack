@@ -54,6 +54,9 @@ class DocumentModel(Base):
     signature_regions: Mapped[list["SignatureRegionModel"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
+    annotations: Mapped[list["AnnotationModel"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
     audit_logs: Mapped[list["AuditLogModel"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
 
@@ -73,6 +76,31 @@ class SignatureRegionModel(Base):
     signature_image_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     document: Mapped["DocumentModel"] = relationship(back_populates="signature_regions")
+
+
+class AnnotationModel(Base):
+    """Admin-authored annotations (highlights, free-draw, text comments) shown on top
+    of a document page to guide signers. Stored as overlays — not burned into the PDF."""
+
+    __tablename__ = "annotations"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    document_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True)
+    page_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # "highlight" | "drawing" | "text"
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    x: Mapped[float] = mapped_column(Float, nullable=False)
+    y: Mapped[float] = mapped_column(Float, nullable=False)
+    width: Mapped[float] = mapped_column(Float, nullable=False)
+    height: Mapped[float] = mapped_column(Float, nullable=False)
+    color: Mapped[str] = mapped_column(String(20), nullable=False, default="#fde047")
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # JSON-encoded list of normalized polylines for free-draw, e.g. [[[x,y],[x,y]], ...]
+    paths: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+
+    document: Mapped["DocumentModel"] = relationship(back_populates="annotations")
 
 
 class AuditLogModel(Base):

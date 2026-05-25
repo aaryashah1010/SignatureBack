@@ -67,6 +67,38 @@ class RegionResponse(BaseModel):
     signed_at: datetime | None
 
 
+class AnnotationCreateItem(BaseModel):
+    page_number: int = Field(ge=1)
+    kind: str = Field(pattern="^(highlight|drawing|text)$")
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+    color: str = Field(default="#fde047", max_length=20)
+    text: str = Field(default="", max_length=2000)
+    # JSON-serialized polyline array (normalized) for DRAWING annotations.
+    paths: str = Field(default="", max_length=200000)
+
+
+class AnnotationCreateRequest(BaseModel):
+    annotations: list[AnnotationCreateItem] = Field(min_length=1)
+
+
+class AnnotationResponse(BaseModel):
+    id: UUID
+    page_number: int
+    kind: str
+    x: float
+    y: float
+    width: float
+    height: float
+    color: str
+    text: str
+    paths: str
+    created_by: UUID
+    created_at: datetime
+
+
 class DocumentResponse(BaseModel):
     id: UUID
     title: str
@@ -76,6 +108,7 @@ class DocumentResponse(BaseModel):
     final_hash: str | None
     created_at: datetime
     regions: list[RegionResponse]
+    annotations: list[AnnotationResponse] = Field(default_factory=list)
 
 
 class SignDocumentRequest(BaseModel):

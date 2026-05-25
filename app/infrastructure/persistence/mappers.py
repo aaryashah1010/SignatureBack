@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.domain.entities.annotation import AnnotationEntity, AnnotationKind
 from app.domain.entities.audit_log import AuditLogEntity
 from app.domain.entities.document import DocumentEntity
 from app.domain.entities.integration import CallbackRecord, IntegrationAuditEntry
@@ -8,6 +9,7 @@ from app.domain.entities.signature_region import SignatureRegionEntity
 from app.domain.entities.user import UserEntity
 from app.domain.value_objects.signature_box import SignatureBox
 from app.infrastructure.persistence.models import (
+    AnnotationModel,
     AuditLogModel,
     CallbackAuditLogModel,
     DocumentModel,
@@ -46,8 +48,29 @@ def map_region(model: SignatureRegionModel) -> SignatureRegionEntity:
     )
 
 
+def map_annotation(model: AnnotationModel) -> AnnotationEntity:
+    return AnnotationEntity(
+        id=model.id,
+        document_id=model.document_id,
+        page_number=model.page_number,
+        kind=AnnotationKind(model.kind),
+        x=model.x,
+        y=model.y,
+        width=model.width,
+        height=model.height,
+        color=model.color,
+        text=model.text,
+        paths=model.paths,
+        created_by=model.created_by,
+        created_at=model.created_at,
+    )
+
+
 def map_document(model: DocumentModel, include_regions: bool = True) -> DocumentEntity:
     regions = [map_region(region) for region in model.signature_regions] if include_regions else []
+    annotations = (
+        [map_annotation(annotation) for annotation in model.annotations] if include_regions else []
+    )
     return DocumentEntity(
         id=model.id,
         title=model.title,
@@ -59,6 +82,7 @@ def map_document(model: DocumentModel, include_regions: bool = True) -> Document
         status=model.status,
         created_at=model.created_at,
         regions=regions,
+        annotations=annotations,
         external_document_id=getattr(model, "external_document_id", None),
         external_path=getattr(model, "external_path", None),
     )

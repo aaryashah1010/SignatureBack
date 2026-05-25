@@ -13,13 +13,19 @@ from app.core.dependencies import get_current_user, get_document_workflow_servic
 from app.domain.entities.enums import UserRole
 from app.domain.entities.user import UserEntity
 from app.presentation.controllers.schemas import (
+    AnnotationCreateRequest,
+    AnnotationResponse,
     DocumentResponse,
     DocumentUploadResponse,
     RegionCreateRequest,
     RegionResponse,
     SignDocumentRequest,
 )
-from app.presentation.controllers.serializers import to_document_response, to_region_response
+from app.presentation.controllers.serializers import (
+    to_annotation_response,
+    to_document_response,
+    to_region_response,
+)
 
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
@@ -135,4 +141,60 @@ async def download_document(
         path=Path(file_path),
         media_type="application/pdf",
         filename=f"signed_{document_id}.pdf",
+    )
+
+
+@router.post(
+    "/{document_id}/annotations",
+    response_model=list[AnnotationResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_annotations(
+    document_id: UUID,
+    payload: AnnotationCreateRequest,
+    workflow_service: Annotated[DocumentWorkflowService, Depends(get_document_workflow_service)],
+    metadata: Annotated[dict[str, str], Depends(request_context)],
+    admin_user: Annotated[UserEntity, Depends(require_role({UserRole.ADMIN}))],
+) -> list[AnnotationResponse]:
+    annotations = await workflow_service.create_annotations(
+        admin_id=admin_user.id,
+        document_id=document_id,
+        annotation_payloads=[item.model_dump() for item in payload.annotations],
+        request_ip=metadata["ip_address"],
+        user_agent=metadata["user_agent"],
+    )
+    return [to_annotation_response(annotation) for annotation in annotations]
+
+
+@router.get("/{document_id}/annotations", response_model=list[AnnotationResponse])
+async def list_annotations(
+    document_id: UUID,
+    workflow_service: Annotated[DocumentWorkflowService, Depends(get_document_workflow_service)],
+    current_user: Annotated[UserEntity, Depends(get_current_user)],
+) -> list[AnnotationResponse]:
+    annotations = await workflow_service.list_annotations(
+        document_id=document_id,
+        requester_id=current_user.id,
+        role=current_user.role,
+    )
+    return [to_annotation_response(annotation) for annotation in annotations]
+
+
+@router.delete(
+    "/{document_id}/annotations/{annotation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_annotation(
+    document_id: UUID,
+    annotation_id: UUID,
+    workflow_service: Annotated[DocumentWorkflowService, Depends(get_document_workflow_service)],
+    metadata: Annotated[dict[str, str], Depends(request_context)],
+    admin_user: Annotated[UserEntity, Depends(require_role({UserRole.ADMIN}))],
+) -> None:
+    await workflow_service.delete_annotation(
+        admin_id=admin_user.id,
+        document_id=document_id,
+        annotation_id=annotation_id,
+        request_ip=metadata["ip_address"],
+        user_agent=metadata["user_agent"],
     )

@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
+from app.domain.entities.annotation import AnnotationEntity
 from app.domain.entities.enums import DocumentStatus
 from app.domain.entities.signature_region import SignatureRegionEntity
 
@@ -18,6 +19,7 @@ class DocumentEntity:
     status: DocumentStatus
     created_at: datetime
     regions: list[SignatureRegionEntity] = field(default_factory=list)
+    annotations: list[AnnotationEntity] = field(default_factory=list)
     # Set when the document originates from an external integration launch.
     external_document_id: str | None = None
     # PhysicalRelativePath from DocumentMaster – relative path where the signed PDF
