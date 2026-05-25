@@ -1,12 +1,19 @@
 import io
+import json
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader, PdfWriter
+from reportlab.lib.colors import HexColor
 from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
 
+from app.domain.entities.annotation import AnnotationEntity, AnnotationKind
 from app.domain.value_objects.signature_box import SignatureBox
+
+
+_DEFAULT_ANNOTATION_COLOR = "#fde047"
 
 
 class SignaturePdfService:
@@ -76,6 +83,7 @@ class SignaturePdfService:
         source_pdf: Path,
         target_pdf: Path,
         signatures: list[tuple[SignatureBox, bytes]],
+        annotations: list[AnnotationEntity] | None = None,
     ) -> None:
         reader = PdfReader(str(source_pdf))
         writer = PdfWriter()
@@ -101,6 +109,28 @@ class SignaturePdfService:
 
             overlay_reader = PdfReader(overlay_stream)
             page.merge_page(overlay_reader.pages[0])
+
+        # Burn admin annotations (highlights, free-draw, text notes) onto each page they belong to.
+        if annotations:
+            annotations_by_page: dict[int, list[AnnotationEntity]] = {}
+            for ann in annotations:
+                annotations_by_page.setdefault(ann.page_number, []).append(ann)
+
+            for page_idx, source_page in enumerate(reader.pages):
+                page_annotations = annotations_by_page.get(page_idx + 1)
+                if not page_annotations:
+                    continue
+                page_width = float(source_page.mediabox.width)
+                page_height = float(source_page.mediabox.height)
+
+                overlay_stream = io.BytesIO()
+                overlay = canvas.Canvas(overlay_stream, pagesize=(page_width, page_height))
+                self._draw_annotations(overlay, page_width, page_height, page_annotations)
+                overlay.save()
+                overlay_stream.seek(0)
+
+                overlay_reader = PdfReader(overlay_stream)
+                source_page.merge_page(overlay_reader.pages[0])
 
         for source_page in reader.pages:
             writer.add_page(source_page)
@@ -144,6 +174,130 @@ class SignaturePdfService:
 
         with target_pdf.open("wb") as f:
             writer.write(f)
+
+    def _draw_annotations(
+        self,
+        overlay: canvas.Canvas,
+        page_width: float,
+        page_height: float,
+        annotations: list[AnnotationEntity],
+    ) -> None:
+        """Render highlight / drawing / text annotations onto a single overlay canvas.
+
+        Annotations store normalized coords with top-left origin; PDF uses bottom-left.
+        """
+        for ann in annotations:
+            ax = ann.x * page_width
+            aw = ann.width * page_width
+            ah = ann.height * page_height
+            ay = page_height - ((ann.y + ann.height) * page_height)
+
+            color = self._safe_hex_color(ann.color)
+
+            if ann.kind == AnnotationKind.HIGHLIGHT:
+                overlay.saveState()
+                overlay.setFillColor(color)
+                overlay.setFillAlpha(0.35)
+                overlay.setStrokeAlpha(0)
+                overlay.rect(ax, ay, aw, ah, stroke=0, fill=1)
+                overlay.restoreState()
+
+            elif ann.kind == AnnotationKind.DRAWING:
+                try:
+                    strokes = json.loads(ann.paths) if ann.paths else []
+                except (ValueError, TypeError):
+                    strokes = []
+                overlay.saveState()
+                overlay.setStrokeColor(color)
+                overlay.setLineWidth(2.0)
+                overlay.setLineCap(1)
+                overlay.setLineJoin(1)
+                for stroke in strokes:
+                    if not isinstance(stroke, list) or len(stroke) < 2:
+                        continue
+                    path = overlay.beginPath()
+                    started = False
+                    for point in stroke:
+                        if not isinstance(point, (list, tuple)) or len(point) < 2:
+                            continue
+                        # Points are normalized within the annotation bounding box (top-left origin).
+                        px = ax + float(point[0]) * aw
+                        py = ay + ah - float(point[1]) * ah
+                        if not started:
+                            path.moveTo(px, py)
+                            started = True
+                        else:
+                            path.lineTo(px, py)
+                    if started:
+                        overlay.drawPath(path, stroke=1, fill=0)
+                overlay.restoreState()
+
+            elif ann.kind == AnnotationKind.TEXT:
+                overlay.saveState()
+                # Soft yellow sticky-note background to match the UI style.
+                overlay.setFillColorRGB(1.0, 0.98, 0.78)
+                overlay.setStrokeColor(color)
+                overlay.setLineWidth(1.0)
+                overlay.rect(ax, ay, aw, ah, stroke=1, fill=1)
+                overlay.setFillColorRGB(0.12, 0.16, 0.22)
+                font_name = "Helvetica"
+                font_size = 9.0
+                overlay.setFont(font_name, font_size)
+                lines = self._wrap_text(
+                    text=ann.text or "",
+                    max_width=max(1.0, aw - 8.0),
+                    font_name=font_name,
+                    font_size=font_size,
+                )
+                line_height = font_size + 2.0
+                text_y = ay + ah - font_size - 4.0
+                for line in lines:
+                    if text_y < ay + 4.0:
+                        break
+                    overlay.drawString(ax + 4.0, text_y, line)
+                    text_y -= line_height
+                overlay.restoreState()
+
+    @staticmethod
+    def _safe_hex_color(value: str):
+        try:
+            return HexColor(value or _DEFAULT_ANNOTATION_COLOR)
+        except (ValueError, TypeError):
+            return HexColor(_DEFAULT_ANNOTATION_COLOR)
+
+    @staticmethod
+    def _wrap_text(text: str, max_width: float, font_name: str, font_size: float) -> list[str]:
+        lines: list[str] = []
+        for paragraph in text.split("\n"):
+            if not paragraph:
+                lines.append("")
+                continue
+            words = paragraph.split(" ")
+            current = ""
+            for word in words:
+                candidate = word if not current else f"{current} {word}"
+                if stringWidth(candidate, font_name, font_size) <= max_width:
+                    current = candidate
+                else:
+                    if current:
+                        lines.append(current)
+                    # Hard-break very long single tokens character-by-character.
+                    if stringWidth(word, font_name, font_size) > max_width:
+                        chunk = ""
+                        for ch in word:
+                            test = chunk + ch
+                            if stringWidth(test, font_name, font_size) <= max_width:
+                                chunk = test
+                            else:
+                                if chunk:
+                                    lines.append(chunk)
+                                chunk = ch
+                        current = chunk
+                    else:
+                        current = word
+            if current:
+                lines.append(current)
+        return lines
 
     def _prepare_overlay_png(self, signature_bytes: bytes, box_width: float, box_height: float) -> bytes:
         render_scale = 3
