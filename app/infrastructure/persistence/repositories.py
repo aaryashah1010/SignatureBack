@@ -274,6 +274,46 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
             await self.session.delete(row)
             await self.session.flush()
 
+    async def get_by_assigned_user(self, user_id: UUID) -> DocumentEntity | None:
+        # Prefer a document with at least one unsigned region for this user.
+        result = await self.session.execute(
+            select(DocumentModel)
+            .join(SignatureRegionModel, SignatureRegionModel.document_id == DocumentModel.id)
+            .where(
+                and_(
+                    SignatureRegionModel.assigned_to == user_id,
+                    SignatureRegionModel.signed.is_(False),
+                    DocumentModel.status.in_(
+                        [DocumentStatus.PENDING, DocumentStatus.PARTIALLY_SIGNED]
+                    ),
+                )
+            )
+            .order_by(DocumentModel.created_at.desc())
+            .options(
+                selectinload(DocumentModel.signature_regions),
+                selectinload(DocumentModel.annotations),
+            )
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            return map_document(row)
+
+        # Fallback: any document with a region assigned to this user.
+        result = await self.session.execute(
+            select(DocumentModel)
+            .join(SignatureRegionModel, SignatureRegionModel.document_id == DocumentModel.id)
+            .where(SignatureRegionModel.assigned_to == user_id)
+            .order_by(DocumentModel.created_at.desc())
+            .options(
+                selectinload(DocumentModel.signature_regions),
+                selectinload(DocumentModel.annotations),
+            )
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        return map_document(row) if row else None
+
     async def get_external_document_id(self, document_id: UUID) -> str | None:
         result = await self.session.execute(
             select(DocumentModel.external_document_id).where(DocumentModel.id == document_id)

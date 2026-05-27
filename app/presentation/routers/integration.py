@@ -143,8 +143,13 @@ async def _exchange_launch_token(raw_token: str, service, raw_role: str = "") ->
     if ctx.role == "ADMIN":
         document = await service.bootstrap_external_document(ctx, local_user.id)
     elif ctx.role == "SIGNER":
-        # Admin may have already bootstrapped this document â€” find it by external ID.
-        document = await service._doc_repo.get_by_external_document_id(ctx.external_document_id)
+        # Multi-signer flow: each signer has their own ESignRequests row (different token).
+        # Find the document by looking for regions already assigned to this local user.
+        # Falls back to None (pending list) if admin hasn't assigned regions yet.
+        document = await service._doc_repo.get_by_assigned_user(local_user.id)
+        # Legacy fallback: single-signer flow where signer shares the same token as admin.
+        if document is None:
+            document = await service._doc_repo.get_by_external_document_id(ctx.external_document_id)
 
     # Issue internal JWT carrying the standard claims.
     access_token = create_access_token(
@@ -219,29 +224,34 @@ async def get_mapped_signers(
     admin_user: Annotated[UserEntity, Depends(require_role({UserRole.ADMIN}))],
     service=Depends(get_integration_service),
 ) -> list[MappedSignerResponse]:
-    """Return signers the admin is allowed to assign.
+    """Return all signers the admin is allowed to assign on this document.
 
-    ESign flow: returns the single client from the ESignRequests row
-                (document.external_document_id is an integer ESignRequestID).
-    Legacy flow: returns all clients mapped to the admin in SQL Server.
+    ESign flow: reads admin's AssignedByLoginID from ESignRequests, then fetches
+                ALL clients from CAPUserClientMapping for that admin — so the admin
+                can assign any of their mapped clients to any region on this PDF.
+    Legacy flow: same CAPUserClientMapping lookup keyed on the admin's local email.
+    Fallback:    if SQL Server is not configured, returns all local SIGNER accounts.
     """
     from app.infrastructure.sqlserver.sqlserver_repository import NullExternalUserRepository
 
-    # ── ESign flow: single signer from ESignRequests ──────────────────────────
+    if isinstance(service._ext_user_repo, NullExternalUserRepository):
+        signers = await service._user_repo.list_signers()
+        return [MappedSignerResponse(id=s.id, name=s.name, email=s.email) for s in signers]
+
+    # Resolve admin's external LoginDetailID — try ESign row first, then email lookup.
+    admin_external_id: str | None = None
+
     document = await service._doc_repo.get_document_by_id(document_id)
     if document and document.external_document_id:
         try:
             esign_request_id = int(document.external_document_id)
-            signer = await service.get_esign_client_for_document(esign_request_id)
-            if signer:
-                return [MappedSignerResponse(id=signer.id, name=signer.name, email=signer.email)]
+            esign_row = await service._ext_user_repo.get_esign_request(esign_request_id)
+            if esign_row and esign_row.get("AssignedByLoginID"):
+                admin_external_id = str(esign_row["AssignedByLoginID"])
         except (TypeError, ValueError):
-            pass  # not an integer ESignRequestID → fall through to legacy path
+            pass
 
-    # ── Legacy flow: mapping from CAPUserClientMapping ────────────────────────
-    if isinstance(service._ext_user_repo, NullExternalUserRepository):
-        signers = await service._user_repo.list_signers()
-    else:
+    if not admin_external_id:
         admin_email = admin_user.email
         if admin_email.endswith("@external.local"):
             admin_external_id = admin_email.removesuffix("@external.local")
@@ -249,12 +259,12 @@ async def get_mapped_signers(
             found_id = await service._ext_user_repo.get_login_detail_id_by_email(admin_email)
             admin_external_id = str(found_id) if found_id else None
 
-        signers = []
-        if admin_external_id:
-            signers = await service.get_allowed_signers_for_admin(
-                admin_external_user_id=admin_external_id
-            )
+    if not admin_external_id:
+        return []
 
+    signers = await service.get_allowed_signers_for_admin(
+        admin_external_user_id=admin_external_id
+    )
     return [MappedSignerResponse(id=s.id, name=s.name, email=s.email) for s in signers]
 
 
