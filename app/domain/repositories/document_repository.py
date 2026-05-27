@@ -101,3 +101,9 @@ class DocumentRepository(ABC):
     @abstractmethod
     async def delete_annotation(self, annotation_id: UUID) -> None:
         raise NotImplementedError
+
+    @abstractmethod
+    async def get_by_assigned_user(self, user_id: UUID) -> DocumentEntity | None:
+        """Find the active document that has at least one region assigned to this user.
+        Prefers documents with unsigned regions; falls back to any assigned document."""
+        raise NotImplementedError
