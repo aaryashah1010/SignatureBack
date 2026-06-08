@@ -107,3 +107,10 @@ class DocumentRepository(ABC):
         """Find the active document that has at least one region assigned to this user.
         Prefers documents with unsigned regions; falls back to any assigned document."""
         raise NotImplementedError
+
+    @abstractmethod
+    async def get_by_external_path(self, external_path: str) -> DocumentEntity | None:
+        """Find the most recent local document bootstrapped from this external PDF URL.
+        Used for multi-signer flow: each signer's ESignRequests row carries the same
+        FileURL as the admin's, so matching by external_path pinpoints the correct doc."""
+        raise NotImplementedError

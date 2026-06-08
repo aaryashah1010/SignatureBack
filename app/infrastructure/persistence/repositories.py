@@ -314,6 +314,24 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
         row = result.scalar_one_or_none()
         return map_document(row) if row else None
 
+    async def get_by_external_path(self, external_path: str) -> DocumentEntity | None:
+        # Used for multi-signer launch: a signer's ESignRequests row points to the
+        # SAME PDF URL the admin bootstrapped from, so external_path is the link.
+        if not external_path:
+            return None
+        result = await self.session.execute(
+            select(DocumentModel)
+            .where(DocumentModel.external_path == external_path)
+            .order_by(DocumentModel.created_at.desc())
+            .options(
+                selectinload(DocumentModel.signature_regions),
+                selectinload(DocumentModel.annotations),
+            )
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        return map_document(row) if row else None
+
     async def get_external_document_id(self, document_id: UUID) -> str | None:
         result = await self.session.execute(
             select(DocumentModel.external_document_id).where(DocumentModel.id == document_id)

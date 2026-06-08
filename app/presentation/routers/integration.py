@@ -143,13 +143,21 @@ async def _exchange_launch_token(raw_token: str, service, raw_role: str = "") ->
     if ctx.role == "ADMIN":
         document = await service.bootstrap_external_document(ctx, local_user.id)
     elif ctx.role == "SIGNER":
-        # Multi-signer flow: each signer has their own ESignRequests row (different token).
-        # Find the document by looking for regions already assigned to this local user.
-        # Falls back to None (pending list) if admin hasn't assigned regions yet.
-        document = await service._doc_repo.get_by_assigned_user(local_user.id)
-        # Legacy fallback: single-signer flow where signer shares the same token as admin.
+        # Multi-signer: a signer's ESignRequests row carries the SAME FileURL as
+        # the admin's row that bootstrapped the local document. external_path
+        # was stored DECRYPTED on the document, so decrypt the launch token's
+        # FileURL before matching.
+        from app.application.services.integration_service import decrypt_path
+        document = None
+        if ctx.document_path:
+            decrypted_url = decrypt_path(ctx.document_path)
+            document = await service._doc_repo.get_by_external_path(decrypted_url)
+        # Single-signer legacy flow (signer shares admin's token / external doc id).
         if document is None:
             document = await service._doc_repo.get_by_external_document_id(ctx.external_document_id)
+        # Last resort: any document with regions assigned to this signer.
+        if document is None:
+            document = await service._doc_repo.get_by_assigned_user(local_user.id)
 
     # Issue internal JWT carrying the standard claims.
     access_token = create_access_token(
