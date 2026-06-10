@@ -259,12 +259,26 @@ class IntegrationService:
         # ── ESign flow: use data already in the context ───────────────────────
         if ctx.esign_request_id is not None:
             if ctx.role == "SIGNER":
-                # CpaClient: use ClientEmail + ClientName from ESignRequests
+                # IMPORTANT: resolve by Client.Email from SQL Server (looked up by
+                # ClientID), NOT by ESignRequests.ClientEmail. The admin's mapped-
+                # signers dropdown uses Client.Email, so we must use the same
+                # source here or the signer ends up as a different local user
+                # than the one the admin assigned regions to (→ 403 on signing).
+                ext_signer = None
+                if ctx.esign_client_id is not None:
+                    ext_signer = await self._ext_user_repo.get_client_by_id(
+                        str(ctx.esign_client_id)
+                    )
                 local_email = (
-                    ctx.esign_client_email
+                    (ext_signer.email if ext_signer else None)
+                    or ctx.esign_client_email
                     or f"{ctx.esign_client_login_detail_id}@external.local"
                 )
-                local_name = ctx.esign_client_name or "Client"
+                local_name = (
+                    (ext_signer.full_name if ext_signer else None)
+                    or ctx.esign_client_name
+                    or "Client"
+                )
             else:
                 # CpaUser (ADMIN): resolved via external_user_id (AssignedByLoginID)
                 ext_user = await self._ext_user_repo.get_user_by_external_id(ctx.external_user_id)
