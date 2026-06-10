@@ -114,3 +114,12 @@ class DocumentRepository(ABC):
         Used for multi-signer flow: each signer's ESignRequests row carries the same
         FileURL as the admin's, so matching by external_path pinpoints the correct doc."""
         raise NotImplementedError
+
+    @abstractmethod
+    async def get_by_external_path_for_user(
+        self, external_path: str, user_id: UUID
+    ) -> DocumentEntity | None:
+        """Find the most recent doc with this external_path AND at least one region
+        assigned to this user. Used in signer launch so we never route a signer to
+        a workflow that has no work for them — they go to the pending list instead."""
+        raise NotImplementedError

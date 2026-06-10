@@ -332,6 +332,33 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
         row = result.scalar_one_or_none()
         return map_document(row) if row else None
 
+    async def get_by_external_path_for_user(
+        self, external_path: str, user_id: UUID
+    ) -> DocumentEntity | None:
+        # Same as get_by_external_path but additionally requires at least one
+        # region on the document to be assigned to user_id. Prevents routing
+        # a signer to a workflow that has no work for them.
+        if not external_path:
+            return None
+        result = await self.session.execute(
+            select(DocumentModel)
+            .join(SignatureRegionModel, SignatureRegionModel.document_id == DocumentModel.id)
+            .where(
+                and_(
+                    DocumentModel.external_path == external_path,
+                    SignatureRegionModel.assigned_to == user_id,
+                )
+            )
+            .order_by(DocumentModel.created_at.desc())
+            .options(
+                selectinload(DocumentModel.signature_regions),
+                selectinload(DocumentModel.annotations),
+            )
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        return map_document(row) if row else None
+
     async def get_external_document_id(self, document_id: UUID) -> str | None:
         result = await self.session.execute(
             select(DocumentModel.external_document_id).where(DocumentModel.id == document_id)

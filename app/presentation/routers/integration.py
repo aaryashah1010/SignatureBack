@@ -146,16 +146,17 @@ async def _exchange_launch_token(raw_token: str, service, raw_role: str = "") ->
         # Multi-signer: a signer's ESignRequests row carries the SAME FileURL as
         # the admin's row that bootstrapped the local document. external_path
         # was stored DECRYPTED on the document, so decrypt the launch token's
-        # FileURL before matching.
+        # FileURL before matching. We also require this signer to have regions
+        # on the matched doc — otherwise the doc loads but 403s on access.
         from app.application.services.integration_service import decrypt_path
         document = None
         if ctx.document_path:
             decrypted_url = decrypt_path(ctx.document_path)
-            document = await service._doc_repo.get_by_external_path(decrypted_url)
-        # Single-signer legacy flow (signer shares admin's token / external doc id).
-        if document is None:
-            document = await service._doc_repo.get_by_external_document_id(ctx.external_document_id)
-        # Last resort: any document with regions assigned to this signer.
+            document = await service._doc_repo.get_by_external_path_for_user(
+                decrypted_url, local_user.id
+            )
+        # Last resort: any document with regions assigned to this signer. If
+        # nothing matches, document stays None → route to pending list.
         if document is None:
             document = await service._doc_repo.get_by_assigned_user(local_user.id)
 
