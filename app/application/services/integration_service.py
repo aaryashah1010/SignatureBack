@@ -778,32 +778,44 @@ class IntegrationService:
         inserted = 0
 
         for user_id in assigned_user_ids:
-            local_user = await self._user_repo.get_by_id(user_id)
-            if not local_user:
-                continue
+            try:
+                local_user = await self._user_repo.get_by_id(user_id)
+                if not local_user:
+                    logger.warning(
+                        "_insert_esign_clients: local user %s not found — skipping", user_id
+                    )
+                    continue
 
-            login_detail_id = await self._ext_user_repo.get_login_detail_id_by_email(local_user.email)
-            if not login_detail_id:
-                logger.warning(
-                    "_insert_esign_clients: no LoginDetailID for user %s (%s) — skipping",
-                    user_id, local_user.email,
+                login_detail_id = await self._ext_user_repo.get_login_detail_id_by_email(local_user.email)
+                if not login_detail_id:
+                    logger.warning(
+                        "_insert_esign_clients: no LoginDetailID for user %s (%s) — skipping",
+                        user_id, local_user.email,
+                    )
+                    continue
+
+                logger.info(
+                    "_insert_esign_clients: processing user=%s email=%s login_detail_id=%s",
+                    user_id, local_user.email, login_detail_id,
                 )
-                continue
-
-            did_insert = await self._ext_user_repo.insert_esign_client_if_not_exists(
-                esign_request_id=esign_request_id,
-                client_id=client_id,
-                client_login_detail_id=login_detail_id,
-                client_name=local_user.name,
-                client_email=local_user.email,
-                created_by=created_by,
-            )
-            if did_insert:
-                inserted += 1
+                did_insert = await self._ext_user_repo.insert_esign_client_if_not_exists(
+                    esign_request_id=esign_request_id,
+                    client_id=client_id,
+                    client_login_detail_id=login_detail_id,
+                    client_name=local_user.name,
+                    client_email=local_user.email,
+                    created_by=created_by,
+                )
+                if did_insert:
+                    inserted += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "_insert_esign_clients: failed for user %s: %s", user_id, exc
+                )
 
         logger.info(
-            "_insert_esign_clients: request_id=%s inserted=%s skipped=%s",
-            esign_request_id, inserted, len(assigned_user_ids) - inserted,
+            "_insert_esign_clients: request_id=%s inserted=%s of %s unique signers",
+            esign_request_id, inserted, len(assigned_user_ids),
         )
 
     async def notify_document_prepared(self, document_id: UUID) -> bool:

@@ -350,8 +350,13 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
         client_email: str,
         created_by: int | None,
     ) -> bool:
-        """INSERT into ESignClients only when no row exists for this request + user pair."""
-        rows_affected = await self._client.execute_non_query(
+        """INSERT into ESignClients only when no row exists for this request + user pair.
+
+        Uses a SELECT after attempted INSERT to confirm success, because pyodbc returns
+        -1 for @@ROWCOUNT inside compound IF/BEGIN/END batches.
+        """
+        # First do the conditional insert.
+        await self._client.execute_non_query(
             """
             IF NOT EXISTS (
                 SELECT 1 FROM ESignClients
@@ -376,7 +381,17 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
                 "created_by": created_by or 0,
             },
         )
-        inserted = rows_affected > 0
+        # Verify the row exists (pyodbc rowcount is unreliable for compound batches).
+        rows = await self._client.execute_query(
+            """
+            SELECT 1 AS Exists
+            FROM   ESignClients
+            WHERE  ESignRequestId      = :request_id
+              AND  ClientLoginDetailId = :login_detail_id
+            """,
+            {"request_id": esign_request_id, "login_detail_id": client_login_detail_id},
+        )
+        inserted = bool(rows)
         if inserted:
             logger.info(
                 "ESignClients inserted: request_id=%s login_detail_id=%s",
