@@ -143,14 +143,23 @@ async def _exchange_launch_token(raw_token: str, service, raw_role: str = "", lo
     if ctx.role == "ADMIN":
         document = await service.bootstrap_external_document(ctx, local_user.id)
     elif ctx.role == "SIGNER":
-        # Multi-signer: a signer's ESignRequests row carries the SAME FileURL as
-        # the admin's row that bootstrapped the local document. external_path
-        # was stored DECRYPTED on the document, so decrypt the launch token's
-        # FileURL before matching. We also require this signer to have regions
-        # on the matched doc — otherwise the doc loads but 403s on access.
+        # 3-tier single-guid flow: the signer launches with the SAME EsignGuid as
+        # the admin, so validate_launch_token already resolved the exact
+        # ESignRequestID into ctx.external_document_id. Match the local document by
+        # that exact id first — this is unambiguous even when several ESignRequests
+        # reuse the same physical FileURL (which makes path matching pick the wrong
+        # doc). The access check in get_document_for_user still guards regions.
         from app.application.services.integration_service import decrypt_path
         document = None
-        if ctx.document_path:
+        if ctx.external_document_id:
+            document = await service._doc_repo.get_by_external_document_id(
+                ctx.external_document_id
+            )
+        # Legacy 2-tier fallback: signer and admin had different ESignRequests rows
+        # linked only by the shared FileURL. external_path was stored DECRYPTED, so
+        # decrypt the launch token's FileURL before matching, and require this
+        # signer to have a region on the matched doc.
+        if document is None and ctx.document_path:
             decrypted_url = decrypt_path(ctx.document_path)
             document = await service._doc_repo.get_by_external_path_for_user(
                 decrypted_url, local_user.id

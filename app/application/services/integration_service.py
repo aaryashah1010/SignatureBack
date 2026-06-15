@@ -196,7 +196,9 @@ class IntegrationService:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                                 detail="ESign token could not be decrypted") from exc
 
-        if decrypted_guid.strip() != esign_request_guid.strip():
+        # Case-insensitive: SQL Server stores/returns the guid case-insensitively and
+        # CpaDesk may send it in either case, but the decrypted EsignToken is lowercase.
+        if decrypted_guid.strip().lower() != esign_request_guid.strip().lower():
             await self._audit("ESIGN_TOKEN_MISMATCH", success=False,
                               details=f"guid={esign_request_guid}")
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
