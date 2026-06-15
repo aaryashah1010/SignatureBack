@@ -76,6 +76,43 @@ class ExternalUserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_client_users_by_parent_id(self, parent_client_id: int) -> list[ExternalUserEntity]:
+        """Return all ClientUser rows under a parent client (3-tier flow).
+
+        Queries ClientUser JOIN LoginDetail WHERE ParentClientID = parent_client_id.
+        Used by the admin mapped-signers dropdown in the new Admin → Client → Users model.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_login_detail_by_id(self, login_detail_id: int) -> ExternalUserEntity | None:
+        """Fetch a LoginDetail row by LoginDetailID.
+
+        Used to resolve a signer's identity when loginDetailId is supplied in the
+        CpaClient launch URL (3-tier flow).
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def mark_esign_client_signed(self, esign_request_id: int, client_login_detail_id: int) -> bool:
+        """Set ESignClients.ESignStatus = 1 for the given signer.
+
+        Called when a signer submits their regions so the CPA-side tracking table
+        reflects that this specific user has completed signing.
+        Returns True if a row was updated, False if no matching row found.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def check_all_esign_clients_signed(self, esign_request_id: int) -> bool:
+        """Return True if every ESignClients row for this request has ESignStatus = 1.
+
+        Used to decide whether to fire the ProcessESignCompletion callback.
+        The callback should only fire once — when the last signer submits.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_external_document_path(self, external_document_id: str) -> str | None:
         """Resolve the document file path from the external document catalogue."""
         raise NotImplementedError

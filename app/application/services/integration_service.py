@@ -162,7 +162,7 @@ class IntegrationService:
     # 1. Launch token validation
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def validate_launch_token(self, esign_request_guid: str, raw_role: str = "") -> LaunchContextEntity:
+    async def validate_launch_token(self, esign_request_guid: str, raw_role: str = "", login_detail_id: int | None = None) -> LaunchContextEntity:
         """Validate a launch request using EsignRequestGuid.
 
         New flow (replaces JWT-based launch):
@@ -215,7 +215,8 @@ class IntegrationService:
         if role == "ADMIN":
             verify_login_id: int | None = esign_row.get("AssignedByLoginID")
         else:
-            verify_login_id = esign_row.get("ClientLoginDetailID")
+            # 3-tier: prefer loginDetailId from URL param; fall back to DB value
+            verify_login_id = login_detail_id or esign_row.get("ClientLoginDetailID")
 
         if not verify_login_id:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
@@ -243,6 +244,7 @@ class IntegrationService:
             esign_client_name=esign_row.get("ClientName"),
             esign_client_email=esign_row.get("ClientEmail"),
             esign_assigned_by_login_id=esign_row.get("AssignedByLoginID"),
+            login_detail_id=login_detail_id,
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -259,26 +261,37 @@ class IntegrationService:
         # ── ESign flow: use data already in the context ───────────────────────
         if ctx.esign_request_id is not None:
             if ctx.role == "SIGNER":
-                # IMPORTANT: resolve by Client.Email from SQL Server (looked up by
-                # ClientID), NOT by ESignRequests.ClientEmail. The admin's mapped-
-                # signers dropdown uses Client.Email, so we must use the same
-                # source here or the signer ends up as a different local user
-                # than the one the admin assigned regions to (→ 403 on signing).
-                ext_signer = None
-                if ctx.esign_client_id is not None:
-                    ext_signer = await self._ext_user_repo.get_client_by_id(
-                        str(ctx.esign_client_id)
+                if ctx.login_detail_id is not None:
+                    # 3-tier flow: CPA sent loginDetailId in URL → look up LoginDetail directly.
+                    # This ensures the local user matches exactly who the admin assigned regions to.
+                    ext_signer = await self._ext_user_repo.get_login_detail_by_id(ctx.login_detail_id)
+                    local_email = (
+                        (ext_signer.email if ext_signer else None)
+                        or f"{ctx.login_detail_id}@external.local"
                     )
-                local_email = (
-                    (ext_signer.email if ext_signer else None)
-                    or ctx.esign_client_email
-                    or f"{ctx.esign_client_login_detail_id}@external.local"
-                )
-                local_name = (
-                    (ext_signer.full_name if ext_signer else None)
-                    or ctx.esign_client_name
-                    or "Client"
-                )
+                    local_name = (
+                        (ext_signer.full_name if ext_signer else None)
+                        or "Client User"
+                    )
+                else:
+                    # 2-tier flow (legacy): resolve by Client.Email looked up via ClientID.
+                    # IMPORTANT: must use Client.Email (not ESignRequests.ClientEmail) so the
+                    # signer resolves to the same local user the admin assigned regions to.
+                    ext_signer = None
+                    if ctx.esign_client_id is not None:
+                        ext_signer = await self._ext_user_repo.get_client_by_id(
+                            str(ctx.esign_client_id)
+                        )
+                    local_email = (
+                        (ext_signer.email if ext_signer else None)
+                        or ctx.esign_client_email
+                        or f"{ctx.esign_client_login_detail_id}@external.local"
+                    )
+                    local_name = (
+                        (ext_signer.full_name if ext_signer else None)
+                        or ctx.esign_client_name
+                        or "Client"
+                    )
             else:
                 # CpaUser (ADMIN): resolved via external_user_id (AssignedByLoginID)
                 ext_user = await self._ext_user_repo.get_user_by_external_id(ctx.external_user_id)
@@ -542,6 +555,35 @@ class IntegrationService:
 
         return local_signers
 
+    async def get_allowed_signers_for_client(self, client_id: int) -> list[UserEntity]:
+        """Return local users for all ClientUser rows under a parent client (3-tier flow).
+
+        Looks up ClientUser WHERE ParentClientID = client_id, joins LoginDetail for
+        names/emails, then upserts each into the local user table so the admin can
+        assign regions to them before they've launched.
+        """
+        ext_users = await self._ext_user_repo.get_client_users_by_parent_id(client_id)
+        await self._audit(
+            "CLIENT_USERS_FETCH",
+            details=f"parent_client_id={client_id} user_count={len(ext_users)}",
+        )
+
+        local_signers: list[UserEntity] = []
+        for ext_user in ext_users:
+            local_email = ext_user.email or f"{ext_user.external_user_id}@external.local"
+            local_user = await self._user_repo.get_by_email(local_email)
+            if not local_user:
+                local_user = await self._user_repo.create(
+                    name=ext_user.full_name or ext_user.username,
+                    email=local_email,
+                    password_hash=hash_password(str(uuid4())),
+                    role=UserRole.SIGNER,
+                )
+                await self._session.commit()
+            local_signers.append(local_user)
+
+        return local_signers
+
     # ─────────────────────────────────────────────────────────────────────────
     # 5. Mapping enforcement (server-side guard before region creation)
     # ─────────────────────────────────────────────────────────────────────────
@@ -575,6 +617,7 @@ class IntegrationService:
         document_id: UUID,
         signer_local_id: UUID,
         signer_external_user_id: str | None,
+        signer_login_detail_id: int | None = None,
     ) -> dict:
         """Gate the SIGNER's submit action on all assigned regions being signed.
 
@@ -630,11 +673,33 @@ class IntegrationService:
 
         import asyncio as _asyncio
         if esign_request_id:
-            # Required flow:
-            # - Admin region-save -> ProcessESignDocumentPrepared (already sent by notify_document_prepared)
-            # - Signer submit     -> ProcessESignCompletion
-            t = _asyncio.create_task(self._send_esign_completion(esign_request_id=esign_request_id, document=document))
-            t.add_done_callback(_log_task_error)
+            # 3-tier flow: update ESignClients tracking row for this signer, then
+            # fire ProcessESignCompletion only when ALL signers have completed.
+            all_signed = False
+            if signer_login_detail_id is not None:
+                await self._ext_user_repo.mark_esign_client_signed(
+                    esign_request_id=esign_request_id,
+                    client_login_detail_id=signer_login_detail_id,
+                )
+                all_signed = await self._ext_user_repo.check_all_esign_clients_signed(esign_request_id)
+                logger.info(
+                    "ESignClients updated: request_id=%s login_detail_id=%s all_signed=%s",
+                    esign_request_id, signer_login_detail_id, all_signed,
+                )
+            else:
+                # Legacy / 2-tier flow: no ESignClients table — treat as all-signed.
+                all_signed = True
+
+            if all_signed:
+                t = _asyncio.create_task(
+                    self._send_esign_completion(esign_request_id=esign_request_id, document=document)
+                )
+                t.add_done_callback(_log_task_error)
+            else:
+                logger.info(
+                    "ProcessESignCompletion deferred — not all signers done yet (request_id=%s)",
+                    esign_request_id,
+                )
         else:
             t = _asyncio.create_task(self._writeback_signed_pdf(document))
             t.add_done_callback(_log_task_error)

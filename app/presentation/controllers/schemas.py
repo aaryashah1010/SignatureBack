@@ -133,6 +133,7 @@ class LaunchRequest(BaseModel):
 
     token: str = Field(min_length=10, description="EsignRequestGuid from ESignRequests table")
     role: str = Field(default="", description="Role sent by CpaDesk e.g. CpaAdmin, CpaClient")
+    login_detail_id: int | None = Field(default=None, description="LoginDetailID for signer (3-tier flow, CpaClient role)")
 
 
 class LaunchResponse(BaseModel):

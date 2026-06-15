@@ -241,6 +241,60 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
         )
         return [self._row_to_entity(row) for row in rows]
 
+    # ── 3-tier: ClientUser + LoginDetail queries ──────────────────────────────
+
+    async def get_client_users_by_parent_id(self, parent_client_id: int) -> list[ExternalUserEntity]:
+        """Return all active ClientUser rows under a parent client joined with LoginDetail.
+
+        Used by the admin mapped-signers dropdown (Admin → Client → Users model).
+        """
+        rows = await self._client.execute_query(
+            """
+            SELECT DISTINCT
+                   cu.LoginDetailID,
+                   ld.UserName,
+                   ld.FirstName,
+                   ld.LastName,
+                   ld.Email,
+                   4              AS RoleID,
+                   NULL           AS Token,
+                   'SIGNER'       AS ResolvedRole
+            FROM   ClientUser cu
+            JOIN   LoginDetail ld ON ld.LoginDetailID = cu.LoginDetailID
+            WHERE  cu.ParentClientID = :parent_id
+              AND  cu.IsActive = 1
+            ORDER BY ld.FirstName, ld.LastName
+            """,
+            {"parent_id": parent_client_id},
+        )
+        return [self._row_to_entity(row) for row in rows]
+
+    async def get_login_detail_by_id(self, login_detail_id: int) -> ExternalUserEntity | None:
+        """Fetch a single LoginDetail row by LoginDetailID.
+
+        Used in the 3-tier signer launch flow to resolve the user identified
+        by the loginDetailId URL param sent by CPA.
+        """
+        rows = await self._client.execute_query(
+            """
+            SELECT TOP 1
+                   l.LoginDetailID,
+                   l.UserName,
+                   l.FirstName,
+                   l.LastName,
+                   l.Email,
+                   l.RoleID,
+                   l.Token,
+                   'SIGNER'  AS ResolvedRole
+            FROM   LoginDetail l
+            WHERE  l.LoginDetailID = :id
+            """,
+            {"id": login_detail_id},
+        )
+        if rows:
+            return self._row_to_entity(rows[0])
+        return None
+
     # ── ESign Requests ────────────────────────────────────────────────────────
 
     async def get_esign_request(self, esign_request_id: int) -> dict | None:
@@ -284,6 +338,49 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
             {"guid": guid},
         )
         return rows[0] if rows else None
+
+    # ── ESignClients tracking ─────────────────────────────────────────────────
+
+    async def mark_esign_client_signed(self, esign_request_id: int, client_login_detail_id: int) -> bool:
+        """Set ESignClients.ESignStatus = 1 for the given signer row."""
+        rows_affected = await self._client.execute_non_query(
+            """
+            UPDATE ESignClients
+            SET    ESignStatus = 1,
+                   UpdatedOn   = GETDATE()
+            WHERE  ESignRequestId      = :request_id
+              AND  ClientLoginDetailId = :login_detail_id
+            """,
+            {"request_id": esign_request_id, "login_detail_id": client_login_detail_id},
+        )
+        if rows_affected > 0:
+            logger.info(
+                "ESignClients marked signed: request_id=%s login_detail_id=%s",
+                esign_request_id, client_login_detail_id,
+            )
+            return True
+        logger.warning(
+            "ESignClients update matched 0 rows: request_id=%s login_detail_id=%s",
+            esign_request_id, client_login_detail_id,
+        )
+        return False
+
+    async def check_all_esign_clients_signed(self, esign_request_id: int) -> bool:
+        """Return True if every ESignClients row for this request has ESignStatus = 1."""
+        rows = await self._client.execute_query(
+            """
+            SELECT COUNT(*)                                          AS Total,
+                   SUM(CASE WHEN ESignStatus = 1 THEN 1 ELSE 0 END) AS Signed
+            FROM   ESignClients
+            WHERE  ESignRequestId = :request_id
+            """,
+            {"request_id": esign_request_id},
+        )
+        if not rows:
+            return False
+        total = int(rows[0].get("Total") or 0)
+        signed = int(rows[0].get("Signed") or 0)
+        return total > 0 and total == signed
 
     # ── Document catalogue ────────────────────────────────────────────────────
 
@@ -375,6 +472,18 @@ class NullExternalUserRepository(ExternalUserRepository):
     async def get_mapped_signers_for_admin(self, _admin_external_user_id: str) -> list[ExternalUserEntity]:
         logger.warning("SQL Server not configured – returning empty signer mapping")
         return []
+
+    async def get_client_users_by_parent_id(self, _parent_client_id: int) -> list[ExternalUserEntity]:
+        return []
+
+    async def get_login_detail_by_id(self, _login_detail_id: int) -> ExternalUserEntity | None:
+        return None
+
+    async def mark_esign_client_signed(self, _esign_request_id: int, _client_login_detail_id: int) -> bool:
+        return False
+
+    async def check_all_esign_clients_signed(self, _esign_request_id: int) -> bool:
+        return False
 
     async def update_document_master_path(self, _document_guid: str, _new_path: str) -> bool:
         return False

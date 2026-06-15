@@ -134,9 +134,9 @@ def get_integration_service(
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-async def _exchange_launch_token(raw_token: str, service, raw_role: str = "") -> LaunchResponse:
+async def _exchange_launch_token(raw_token: str, service, raw_role: str = "", login_detail_id: int | None = None) -> LaunchResponse:
     """Shared launch flow used by both GET and POST endpoints."""
-    ctx = await service.validate_launch_token(raw_token, raw_role)
+    ctx = await service.validate_launch_token(raw_token, raw_role, login_detail_id)
     local_user = await service.resolve_or_create_local_user(ctx)
 
     document = None
@@ -197,7 +197,7 @@ async def launch(
     service=Depends(get_integration_service),
 ) -> LaunchResponse:
     """Exchange an EsignGuid + role for an internal JWT session."""
-    return await _exchange_launch_token(payload.token, service, payload.role)
+    return await _exchange_launch_token(payload.token, service, payload.role, payload.login_detail_id)
 
 
 @router.get("/launch", response_model=LaunchResponse, status_code=status.HTTP_200_OK)
@@ -205,6 +205,7 @@ async def launch_get(
     request: Request,
     token: Annotated[str, Query(min_length=10, description="EsignRequestGuid from ESignRequests")],
     role: Annotated[str, Query(description="Role sent by CpaDesk e.g. CpaAdmin, CpaClient")],
+    loginDetailId: Annotated[int | None, Query(description="LoginDetailID for signer (CpaClient 3-tier flow)")] = None,
     service=Depends(get_integration_service),
 ) -> LaunchResponse | RedirectResponse:
     """Exchange an EsignGuid + role passed as query parameters."""
@@ -215,12 +216,14 @@ async def launch_get(
         params = {"token": token}
         if role:
             params["role"] = role
+        if loginDetailId is not None:
+            params["loginDetailId"] = loginDetailId
         return RedirectResponse(
             url=f"/launch?{urlencode(params)}",
             status_code=status.HTTP_307_TEMPORARY_REDIRECT,
         )
 
-    return await _exchange_launch_token(token, service, role)
+    return await _exchange_launch_token(token, service, role, loginDetailId)
 
 
 @router.get(
@@ -235,10 +238,9 @@ async def get_mapped_signers(
 ) -> list[MappedSignerResponse]:
     """Return all signers the admin is allowed to assign on this document.
 
-    ESign flow: reads admin's AssignedByLoginID from ESignRequests, then fetches
-                ALL clients from CAPUserClientMapping for that admin — so the admin
-                can assign any of their mapped clients to any region on this PDF.
-    Legacy flow: same CAPUserClientMapping lookup keyed on the admin's local email.
+    3-tier flow: reads ClientID from ESignRequests → ClientUser WHERE ParentClientID=ClientID
+                 → LoginDetail for names. This is the new Admin → Client → Users model.
+    Legacy flow: CAPUserClientMapping by admin's LoginDetailID (fallback when no ClientID).
     Fallback:    if SQL Server is not configured, returns all local SIGNER accounts.
     """
     from app.infrastructure.sqlserver.sqlserver_repository import NullExternalUserRepository
@@ -247,18 +249,26 @@ async def get_mapped_signers(
         signers = await service._user_repo.list_signers()
         return [MappedSignerResponse(id=s.id, name=s.name, email=s.email) for s in signers]
 
-    # Resolve admin's external LoginDetailID — try ESign row first, then email lookup.
-    admin_external_id: str | None = None
-
     document = await service._doc_repo.get_document_by_id(document_id)
+    esign_row: dict | None = None
+
     if document and document.external_document_id:
         try:
             esign_request_id = int(document.external_document_id)
             esign_row = await service._ext_user_repo.get_esign_request(esign_request_id)
-            if esign_row and esign_row.get("AssignedByLoginID"):
-                admin_external_id = str(esign_row["AssignedByLoginID"])
         except (TypeError, ValueError):
             pass
+
+    # ── 3-tier flow: ClientUser WHERE ParentClientID = ESignRequests.ClientID ──
+    if esign_row and esign_row.get("ClientID"):
+        client_id = int(esign_row["ClientID"])
+        signers = await service.get_allowed_signers_for_client(client_id)
+        return [MappedSignerResponse(id=s.id, name=s.name, email=s.email) for s in signers]
+
+    # ── Legacy fallback: CAPUserClientMapping by admin's LoginDetailID ─────────
+    admin_external_id: str | None = None
+    if esign_row and esign_row.get("AssignedByLoginID"):
+        admin_external_id = str(esign_row["AssignedByLoginID"])
 
     if not admin_external_id:
         admin_email = admin_user.email
@@ -341,19 +351,28 @@ async def submit_document(
     """
     service = _get_integration_service(session, request)
 
-    # Derive external_user_id from the signer's local email (inverse of the
-    # upsert logic).  If the user was created via integration launch, the email
-    # is `<external_user_id>@external.local`; otherwise it's a real email that
-    # won't match any external record and the callback is skipped gracefully.
+    # Resolve the signer's external LoginDetailID so we can update ESignClients.
+    # For 3-tier signers their local email comes from LoginDetail (real email or
+    # the @external.local placeholder).  For the @external.local case the prefix
+    # IS the LoginDetailID.  For real emails we look it up via SQL Server.
     email = signer_user.email
     external_user_id: str | None = None
+    signer_login_detail_id: int | None = None
+
     if email.endswith("@external.local"):
         external_user_id = email.removesuffix("@external.local")
+        try:
+            signer_login_detail_id = int(external_user_id)
+        except ValueError:
+            pass
+    else:
+        signer_login_detail_id = await service._ext_user_repo.get_login_detail_id_by_email(email)
 
     result = await service.submit_document(
         document_id=document_id,
         signer_local_id=signer_user.id,
         signer_external_user_id=external_user_id,
+        signer_login_detail_id=signer_login_detail_id,
     )
 
     return SubmitDocumentResponse(

@@ -48,6 +48,8 @@ class LaunchContextEntity:
     esign_client_name: str | None = None         # ESignRequests.ClientName
     esign_client_email: str | None = None        # ESignRequests.ClientEmail
     esign_assigned_by_login_id: int | None = None    # ESignRequests.AssignedByLoginID
+    # 3-tier flow: LoginDetailID passed by CPA in ?loginDetailId= query param (CpaClient role)
+    login_detail_id: int | None = None
 
 
 @dataclass(slots=True)

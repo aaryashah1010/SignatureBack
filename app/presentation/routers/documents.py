@@ -108,7 +108,12 @@ async def get_document_file(
         requester_id=current_user.id,
         role=current_user.role,
     )
-    return FileResponse(path=Path(file_path), media_type="application/pdf", filename=f"{document_id}.pdf")
+    return FileResponse(
+        path=Path(file_path),
+        media_type="application/pdf",
+        filename=f"{document_id}.pdf",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @router.post("/{document_id}/sign", response_model=DocumentResponse)
