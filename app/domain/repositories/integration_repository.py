@@ -94,6 +94,24 @@ class ExternalUserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def insert_esign_client_if_not_exists(
+        self,
+        esign_request_id: int,
+        client_id: int | None,
+        client_login_detail_id: int,
+        client_name: str,
+        client_email: str,
+        created_by: int | None,
+    ) -> bool:
+        """INSERT a row into ESignClients for one signer if it doesn't already exist.
+
+        Called after admin saves regions so CPA knows who to email.
+        Skips insert if the row already exists (safe for re-saves).
+        Returns True if a row was inserted, False if it already existed.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def mark_esign_client_signed(self, esign_request_id: int, client_login_detail_id: int) -> bool:
         """Set ESignClients.ESignStatus = 1 for the given signer.
 

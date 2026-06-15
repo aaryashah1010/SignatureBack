@@ -341,6 +341,49 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
 
     # ── ESignClients tracking ─────────────────────────────────────────────────
 
+    async def insert_esign_client_if_not_exists(
+        self,
+        esign_request_id: int,
+        client_id: int | None,
+        client_login_detail_id: int,
+        client_name: str,
+        client_email: str,
+        created_by: int | None,
+    ) -> bool:
+        """INSERT into ESignClients only when no row exists for this request + user pair."""
+        rows_affected = await self._client.execute_non_query(
+            """
+            IF NOT EXISTS (
+                SELECT 1 FROM ESignClients
+                WHERE  ESignRequestId      = :request_id
+                  AND  ClientLoginDetailId = :login_detail_id
+            )
+            BEGIN
+                INSERT INTO ESignClients
+                    (ESignRequestId, ClientId, ClientName, ClientLoginDetailId,
+                     ClientEmail, ESignStatus, CreatedOn, CreatedBy, UpdatedOn, UpdatedBy)
+                VALUES
+                    (:request_id, :client_id, :client_name, :login_detail_id,
+                     :client_email, 0, GETDATE(), :created_by, GETDATE(), :created_by)
+            END
+            """,
+            {
+                "request_id": esign_request_id,
+                "client_id": client_id or 0,
+                "login_detail_id": client_login_detail_id,
+                "client_name": client_name,
+                "client_email": client_email,
+                "created_by": created_by or 0,
+            },
+        )
+        inserted = rows_affected > 0
+        if inserted:
+            logger.info(
+                "ESignClients inserted: request_id=%s login_detail_id=%s",
+                esign_request_id, client_login_detail_id,
+            )
+        return inserted
+
     async def mark_esign_client_signed(self, esign_request_id: int, client_login_detail_id: int) -> bool:
         """Set ESignClients.ESignStatus = 1 for the given signer row."""
         rows_affected = await self._client.execute_non_query(
@@ -478,6 +521,17 @@ class NullExternalUserRepository(ExternalUserRepository):
 
     async def get_login_detail_by_id(self, _login_detail_id: int) -> ExternalUserEntity | None:
         return None
+
+    async def insert_esign_client_if_not_exists(
+        self,
+        _esign_request_id: int,
+        _client_id: int | None,
+        _client_login_detail_id: int,
+        _client_name: str,
+        _client_email: str,
+        _created_by: int | None,
+    ) -> bool:
+        return False
 
     async def mark_esign_client_signed(self, _esign_request_id: int, _client_login_detail_id: int) -> bool:
         return False

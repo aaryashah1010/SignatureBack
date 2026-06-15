@@ -747,6 +747,54 @@ class IntegrationService:
             await self._session.commit()
         return local_user
 
+    async def _insert_esign_clients(
+        self,
+        document,
+        esign_request_id: int,
+        esign_row: dict,
+    ) -> None:
+        """Insert one ESignClients row per assigned signer so CPA can email them.
+
+        Only inserts rows that don't already exist (safe for admin re-saves).
+        Resolves each signer's LoginDetailID via their local email → SQL Server lookup.
+        """
+        assigned_user_ids = {r.assigned_to for r in document.regions if r.assigned_to}
+        if not assigned_user_ids:
+            return
+
+        client_id: int | None = esign_row.get("ClientID")
+        created_by: int | None = esign_row.get("AssignedByLoginID")
+        inserted = 0
+
+        for user_id in assigned_user_ids:
+            local_user = await self._user_repo.get_by_id(user_id)
+            if not local_user:
+                continue
+
+            login_detail_id = await self._ext_user_repo.get_login_detail_id_by_email(local_user.email)
+            if not login_detail_id:
+                logger.warning(
+                    "_insert_esign_clients: no LoginDetailID for user %s (%s) — skipping",
+                    user_id, local_user.email,
+                )
+                continue
+
+            did_insert = await self._ext_user_repo.insert_esign_client_if_not_exists(
+                esign_request_id=esign_request_id,
+                client_id=client_id,
+                client_login_detail_id=login_detail_id,
+                client_name=local_user.name,
+                client_email=local_user.email,
+                created_by=created_by,
+            )
+            if did_insert:
+                inserted += 1
+
+        logger.info(
+            "_insert_esign_clients: request_id=%s inserted=%s skipped=%s",
+            esign_request_id, inserted, len(assigned_user_ids) - inserted,
+        )
+
     async def notify_document_prepared(self, document_id: UUID) -> bool:
         """Send the original PDF to CpaDesk with Status='Pending'.
 
@@ -766,6 +814,11 @@ class IntegrationService:
         if not esign_request_id:
             logger.debug("notify_document_prepared: not an ESign document (%s)", document_id)
             return False
+
+        # Insert ESignClients rows for each assigned signer so CPA can email them.
+        esign_row = await self._ext_user_repo.get_esign_request(esign_request_id)
+        if esign_row:
+            await self._insert_esign_clients(document, esign_request_id, esign_row)
 
         # Render region boxes onto original PDF so CpaDesk sees where signatures will go
         from app.infrastructure.pdf_engine.signature_pdf_service import SignaturePdfService
