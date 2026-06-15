@@ -122,6 +122,15 @@ class ExternalUserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def update_esign_request_completed(self, esign_request_id: int) -> bool:
+        """Set ESignRequests.Status = 'Completed' and SignedOn = now when all signers are done.
+
+        Called once — after the last signer submits and all ESignClients rows are signed.
+        Only touches Status, SignedOn, UpdatedOn — CPA handles UpdatedBy on their side.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def check_all_esign_clients_signed(self, esign_request_id: int) -> bool:
         """Return True if every ESignClients row for this request has ESignStatus = 1.
 

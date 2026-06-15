@@ -673,8 +673,7 @@ class IntegrationService:
 
         import asyncio as _asyncio
         if esign_request_id:
-            # 3-tier flow: update ESignClients tracking row for this signer, then
-            # fire ProcessESignCompletion only when ALL signers have completed.
+            # Step 1: mark this signer's ESignClients row as signed.
             all_signed = False
             if signer_login_detail_id is not None:
                 await self._ext_user_repo.mark_esign_client_signed(
@@ -687,19 +686,31 @@ class IntegrationService:
                     esign_request_id, signer_login_detail_id, all_signed,
                 )
             else:
-                # Legacy / 2-tier flow: no ESignClients table — treat as all-signed.
+                # Legacy / 2-tier flow: no ESignClients tracking — treat as all-signed.
                 all_signed = True
 
+            # Step 2: get ClientID from ESignRequests for the callback payload.
+            esign_row = await self._ext_user_repo.get_esign_request(esign_request_id)
+            client_id: int | None = int(esign_row["ClientID"]) if esign_row and esign_row.get("ClientID") else None
+
+            # Step 3: always fire ProcessESignCompletion per signer so CPA can email them.
+            t = _asyncio.create_task(
+                self._send_esign_completion(
+                    esign_request_id=esign_request_id,
+                    document=document,
+                    client_id=client_id,
+                    client_login_detail_id=signer_login_detail_id,
+                )
+            )
+            t.add_done_callback(_log_task_error)
+
+            # Step 4: when ALL signers are done → mark ESignRequests as Completed.
             if all_signed:
-                t = _asyncio.create_task(
-                    self._send_esign_completion(esign_request_id=esign_request_id, document=document)
+                t2 = _asyncio.create_task(
+                    self._ext_user_repo.update_esign_request_completed(esign_request_id)
                 )
-                t.add_done_callback(_log_task_error)
-            else:
-                logger.info(
-                    "ProcessESignCompletion deferred — not all signers done yet (request_id=%s)",
-                    esign_request_id,
-                )
+                t2.add_done_callback(_log_task_error)
+                logger.info("All signers done — ESignRequests marked Completed: request_id=%s", esign_request_id)
         else:
             t = _asyncio.create_task(self._writeback_signed_pdf(document))
             t.add_done_callback(_log_task_error)
@@ -911,8 +922,18 @@ class IntegrationService:
             logger.error("ProcessESignDocumentPrepared failed for ESignRequestID=%s: %s", esign_request_id, exc)
             return False
 
-    async def _send_esign_completion(self, esign_request_id: int, document=None) -> bool:
-        """POST signed PDF bytes to CpaDesk ProcessESignCompletion endpoint."""
+    async def _send_esign_completion(
+        self,
+        esign_request_id: int,
+        document=None,
+        client_id: int | None = None,
+        client_login_detail_id: int | None = None,
+    ) -> bool:
+        """POST signed PDF bytes to CpaDesk ProcessESignCompletion endpoint.
+
+        Fires once per signer submit so CPA can send confirmation emails.
+        Includes ClientId + ClientLoginDetailId so CPA knows which user signed.
+        """
         import base64
         import httpx
 
@@ -921,7 +942,6 @@ class IntegrationService:
             logger.warning("No callback base URL available – skipping ProcessESignCompletion")
             return False
 
-        # Read signed PDF bytes
         pdf_bytes_b64 = None
         if document and document.final_path:
             try:
@@ -930,17 +950,26 @@ class IntegrationService:
             except Exception as exc:
                 logger.warning("Could not read signed PDF for completion callback: %s", exc)
 
+        payload: dict = {
+            "ESignRequestID": esign_request_id,
+            "FileBytes": pdf_bytes_b64,
+        }
+        if client_id is not None:
+            payload["ClientId"] = client_id
+        if client_login_detail_id is not None:
+            payload["ClientLoginDetailId"] = client_login_detail_id
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(
                     f"{base_url.rstrip('/')}/api/ESign/ProcessESignCompletion",
-                    json={
-                        "ESignRequestID": esign_request_id,
-                        "FileBytes": pdf_bytes_b64,
-                    },
+                    json=payload,
                 )
                 response.raise_for_status()
-            logger.info("ProcessESignCompletion succeeded for ESignRequestID=%s", esign_request_id)
+            logger.info(
+                "ProcessESignCompletion succeeded: request_id=%s login_detail_id=%s",
+                esign_request_id, client_login_detail_id,
+            )
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("ProcessESignCompletion failed for ESignRequestID=%s: %s", esign_request_id, exc)

@@ -408,6 +408,24 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
         )
         return False
 
+    async def update_esign_request_completed(self, esign_request_id: int) -> bool:
+        """Set Status='Completed' and SignedOn=now on ESignRequests when all signers done."""
+        rows_affected = await self._client.execute_non_query(
+            """
+            UPDATE ESignRequests
+            SET    Status    = 'Completed',
+                   SignedOn  = GETDATE(),
+                   UpdatedOn = GETDATE()
+            WHERE  ESignRequestID = :request_id
+            """,
+            {"request_id": esign_request_id},
+        )
+        if rows_affected > 0:
+            logger.info("ESignRequests marked Completed: request_id=%s", esign_request_id)
+            return True
+        logger.warning("ESignRequests update matched 0 rows: request_id=%s", esign_request_id)
+        return False
+
     async def check_all_esign_clients_signed(self, esign_request_id: int) -> bool:
         """Return True if every ESignClients row for this request has ESignStatus = 1."""
         rows = await self._client.execute_query(
@@ -531,6 +549,9 @@ class NullExternalUserRepository(ExternalUserRepository):
         _client_email: str,
         _created_by: int | None,
     ) -> bool:
+        return False
+
+    async def update_esign_request_completed(self, _esign_request_id: int) -> bool:
         return False
 
     async def mark_esign_client_signed(self, _esign_request_id: int, _client_login_detail_id: int) -> bool:
