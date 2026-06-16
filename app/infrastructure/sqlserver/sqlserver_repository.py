@@ -384,7 +384,7 @@ class SqlServerExternalUserRepository(ExternalUserRepository):
         # Verify the row exists (pyodbc rowcount is unreliable for compound batches).
         rows = await self._client.execute_query(
             """
-            SELECT 1 AS Exists
+            SELECT TOP 1 1 AS Found
             FROM   ESignClients
             WHERE  ESignRequestId      = :request_id
               AND  ClientLoginDetailId = :login_detail_id
