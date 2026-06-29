@@ -125,6 +125,19 @@ class SignDocumentRequest(BaseModel):
     uploaded_signature_base64: str | None = None
 
 
+class SignAllRequest(BaseModel):
+    """One signature to apply to every region assigned to the current signer."""
+
+    method: SignatureMethod
+    drawn_signature_base64: str | None = None
+    typed_name: str | None = None
+    typed_font: str | None = None
+    uploaded_signature_base64: str | None = None
+    remember_signature: bool = Field(
+        default=False, description="Persist this signature for reuse on future documents"
+    )
+
+
 # ── Integration schemas ───────────────────────────────────────────────────────
 
 

@@ -226,6 +226,132 @@ class DocumentWorkflowService:
         await self.event_bus.publish("workflow.events", {"type": "region_signed", "document_id": str(document_id)})
         return updated_document
 
+    async def sign_all_regions(
+        self,
+        document_id: UUID,
+        signer_id: UUID,
+        sign_request: dict,
+        request_ip: str,
+        user_agent: str,
+    ) -> DocumentEntity:
+        """Apply ONE signature to every region assigned to this signer, in a single render.
+
+        The signature image is built once (draw / type / upload) and stretched to fit
+        each assigned box — same per-box scaling as sign_region. Regions already signed
+        by other signers are preserved. The PDF is rebuilt once from the original.
+        """
+        document = await self.document_repository.get_document_by_id(document_id)
+        if not document:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+        signer_regions = [r for r in document.regions if r.assigned_to == signer_id]
+        if not signer_regions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No signature regions are assigned to you for this document",
+            )
+
+        method = SignatureMethod(sign_request["method"])
+        signature_bytes = self._build_signature_bytes(method=method, payload=sign_request)
+
+        # Preserve signatures already applied by OTHER signers.
+        signatures: list[tuple[SignatureBox, bytes]] = []
+        for region in document.regions:
+            if region.assigned_to == signer_id:
+                continue
+            if region.signed and region.signature_image_path:
+                image_path = Path(region.signature_image_path)
+                if image_path.exists():
+                    signatures.append((region.box, image_path.read_bytes()))
+
+        # Apply the one signature to each of this signer's regions and persist each image.
+        signed_at = datetime.now(UTC)
+        for region in signer_regions:
+            signature_image_path = self.settings.signature_images_dir / f"{region.id}_{uuid4()}.png"
+            signature_image_path.write_bytes(signature_bytes)
+            signatures.append((region.box, signature_bytes))
+            await self.document_repository.mark_region_signed(
+                region_id=region.id,
+                signature_image_path=str(signature_image_path),
+                signed_at=signed_at,
+            )
+
+        target_pdf = self.settings.signed_storage_dir / f"{document.id}_{uuid4()}.pdf"
+        signatures.sort(key=lambda item: (item[0].page_number, item[0].y, item[0].x))
+        self.pdf_service.apply_signatures(
+            source_pdf=Path(document.original_path),
+            target_pdf=target_pdf,
+            signatures=signatures,
+            annotations=document.annotations,
+        )
+
+        final_hash = hashlib.sha256(target_pdf.read_bytes()).hexdigest()
+        updated_document = await self.document_repository.update_document_after_sign(
+            document_id=document_id,
+            final_path=str(target_pdf),
+            final_hash=final_hash,
+        )
+
+        await self.audit_repository.create_log(
+            document_id=document_id,
+            user_id=signer_id,
+            action="REGIONS_SIGNED_ALL",
+            ip_address=request_ip,
+            user_agent=user_agent,
+            document_hash=final_hash,
+        )
+        await self.session.commit()
+
+        await self.event_bus.invalidate_key(f"pending_documents:{signer_id}")
+        await self.event_bus.publish("workflow.events", {"type": "region_signed", "document_id": str(document_id)})
+        return updated_document
+
+    # ── Remembered signature (reused across documents) ────────────────────────
+
+    _SIGNATURE_FIELDS = (
+        "drawn_signature_base64",
+        "typed_name",
+        "typed_font",
+        "uploaded_signature_base64",
+    )
+
+    async def save_user_signature(self, user_id: UUID, sign_payload: dict) -> None:
+        """Upsert the user's remembered signature so it can be reused on future documents."""
+        import json
+
+        from app.infrastructure.persistence.models import UserSignatureModel
+
+        method = sign_payload.get("method")
+        data = {k: sign_payload.get(k) for k in self._SIGNATURE_FIELDS if sign_payload.get(k)}
+        data_json = json.dumps(data)
+
+        existing = await self.session.get(UserSignatureModel, user_id)
+        if existing:
+            existing.method = method
+            existing.signature_data = data_json
+            existing.updated_at = datetime.now(UTC)
+        else:
+            self.session.add(
+                UserSignatureModel(user_id=user_id, method=method, signature_data=data_json)
+            )
+        await self.session.commit()
+
+    async def get_user_signature(self, user_id: UUID) -> dict | None:
+        """Return the user's remembered signature payload, or None if not saved."""
+        import json
+
+        from app.infrastructure.persistence.models import UserSignatureModel
+
+        row = await self.session.get(UserSignatureModel, user_id)
+        if not row:
+            return None
+        payload = {"method": row.method}
+        try:
+            payload.update(json.loads(row.signature_data))
+        except (ValueError, TypeError):
+            pass
+        return payload
+
     async def create_annotations(
         self,
         admin_id: UUID,

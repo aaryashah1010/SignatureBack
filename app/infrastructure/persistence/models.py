@@ -25,6 +25,26 @@ class UserModel(Base):
     uploaded_documents: Mapped[list["DocumentModel"]] = relationship(back_populates="uploader")
 
 
+class UserSignatureModel(Base):
+    """A signer's remembered signature, reused across documents (one row per user)."""
+
+    __tablename__ = "user_signatures"
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True
+    )
+    # "draw" | "type" | "upload"
+    method: Mapped[str] = mapped_column(String(20), nullable=False)
+    # JSON blob of the signature payload (drawn/uploaded base64, or typed name + font).
+    signature_data: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 class DocumentModel(Base):
     __tablename__ = "documents"
 

@@ -19,6 +19,7 @@ from app.presentation.controllers.schemas import (
     DocumentUploadResponse,
     RegionCreateRequest,
     RegionResponse,
+    SignAllRequest,
     SignDocumentRequest,
 )
 from app.presentation.controllers.serializers import (
@@ -132,6 +133,29 @@ async def sign_document(
         request_ip=metadata["ip_address"],
         user_agent=metadata["user_agent"],
     )
+    return to_document_response(updated_document)
+
+
+@router.post("/{document_id}/sign-all", response_model=DocumentResponse)
+async def sign_all_regions(
+    document_id: UUID,
+    payload: SignAllRequest,
+    workflow_service: Annotated[DocumentWorkflowService, Depends(get_document_workflow_service)],
+    metadata: Annotated[dict[str, str], Depends(request_context)],
+    signer_user: Annotated[UserEntity, Depends(require_role({UserRole.SIGNER}))],
+) -> DocumentResponse:
+    """Apply one signature to every region assigned to the current signer."""
+    sign_payload = payload.model_dump()
+    updated_document = await workflow_service.sign_all_regions(
+        document_id=document_id,
+        signer_id=signer_user.id,
+        sign_request=sign_payload,
+        request_ip=metadata["ip_address"],
+        user_agent=metadata["user_agent"],
+    )
+    # Feature 3b: persist the signature for reuse on future documents when asked.
+    if payload.remember_signature:
+        await workflow_service.save_user_signature(signer_user.id, sign_payload)
     return to_document_response(updated_document)
 
 

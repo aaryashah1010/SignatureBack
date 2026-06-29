@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.presentation.middlewares.request_id import RequestIDMiddleware
-from app.presentation.routers import auth, documents, users
+from app.presentation.routers import annotate, auth, documents, users
 from app.presentation.routers.integration import router as integration_router
 from app.presentation.routers.integration import submit_router
 
@@ -38,6 +38,8 @@ app.include_router(users.router, prefix=settings.api_prefix)
 app.include_router(integration_router, prefix=settings.api_prefix)
 # Submit: POST /api/documents/{id}/submit  (lives alongside existing document endpoints)
 app.include_router(submit_router, prefix=settings.api_prefix)
+# Standalone annotate (highlight/draw/comment) — isolated from the signing flow.
+app.include_router(annotate.router, prefix=settings.api_prefix)
 
 
 @app.get("/health")
