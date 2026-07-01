@@ -137,6 +137,25 @@ def _to_annotation_entity(item: AnnotateItem) -> AnnotationEntity:
     )
 
 
+async def _mark_highlighted(ref: str) -> None:
+    """Flip HighlightRequests.IsHighlight = 1 so CPA knows the doc was actually annotated.
+
+    Rows left at 0 mean the user only viewed and closed — CPA can safely delete those.
+    """
+    ss = _get_sqlserver_client()
+    if ss is None:
+        return
+    await ss.execute_non_query(
+        """
+        UPDATE HighlightRequests
+        SET    IsHighlight = 1,
+               UpdatedOn   = GETDATE()
+        WHERE  HighlightGuid = :guid
+        """,
+        {"guid": ref},
+    )
+
+
 async def _send_highlight_callback(row: dict, file_b64: str) -> bool:
     """POST the annotated PDF bytes back to CpaDesk (base URL derived from FileURL host)."""
     decrypted = decrypt_path(row.get("FileURL") or "")
@@ -149,6 +168,7 @@ async def _send_highlight_callback(row: dict, file_b64: str) -> bool:
         "HighlightRequestID": row.get("HighlightRequestID"),
         "HighlightGuid": str(row.get("HighlightGuid")),
         "FileBytes": file_b64,
+        "IsHighlight": True,
     }
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -212,7 +232,10 @@ async def annotate_save(payload: AnnotateSaveRequest) -> dict:
             except OSError:
                 pass
 
+    # Mark the request as actually annotated so CPA keeps the row (viewed-only stays 0).
+    await _mark_highlighted(payload.ref)
+
     file_b64 = base64.b64encode(result_bytes).decode("utf-8")
     delivered = await _send_highlight_callback(row, file_b64)
     # Also return the bytes so the caller has them regardless of callback delivery.
-    return {"ok": True, "callback_delivered": delivered, "file_bytes": file_b64}
+    return {"ok": True, "is_highlight": True, "callback_delivered": delivered, "file_bytes": file_b64}
