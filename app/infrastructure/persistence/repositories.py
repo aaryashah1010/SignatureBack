@@ -180,6 +180,15 @@ class SqlAlchemyDocumentRepository(DocumentRepository):
         await self.session.flush()
         return map_region(region)
 
+    async def unmark_region_signed(self, region_id: UUID) -> SignatureRegionEntity:
+        result = await self.session.execute(select(SignatureRegionModel).where(SignatureRegionModel.id == region_id))
+        region = result.scalar_one()
+        region.signed = False
+        region.signed_at = None
+        region.signature_image_path = None
+        await self.session.flush()
+        return map_region(region)
+
     async def update_document_after_sign(
         self,
         document_id: UUID,

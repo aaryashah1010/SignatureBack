@@ -123,6 +123,7 @@ class SignDocumentRequest(BaseModel):
     typed_name: str | None = None
     typed_font: str | None = None
     uploaded_signature_base64: str | None = None
+    remember_signature: bool = Field(default=False, description="Persist this signature for reuse on future documents")
 
 
 class SignAllRequest(BaseModel):

@@ -53,6 +53,11 @@ class DocumentRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def unmark_region_signed(self, region_id: UUID) -> SignatureRegionEntity:
+        """Clear a region's signature (signed=False, no image, no timestamp)."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def update_document_after_sign(
         self,
         document_id: UUID,

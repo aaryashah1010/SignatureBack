@@ -226,6 +226,60 @@ class DocumentWorkflowService:
         await self.event_bus.publish("workflow.events", {"type": "region_signed", "document_id": str(document_id)})
         return updated_document
 
+    async def unsign_region(
+        self,
+        document_id: UUID,
+        region_id: UUID,
+        signer_id: UUID,
+        request_ip: str,
+        user_agent: str,
+    ) -> DocumentEntity:
+        """Remove a signer's signature from one region and rebuild the PDF without it."""
+        document = await self.document_repository.get_document_by_id(document_id)
+        if not document:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+        region = await self.document_repository.get_region_by_id(region_id)
+        if not region or region.document_id != document_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Signature region not found")
+        if region.assigned_to != signer_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Region is assigned to a different signer")
+        if not region.signed:
+            return document  # nothing to remove
+
+        await self.document_repository.unmark_region_signed(region_id)
+
+        # Rebuild the PDF from the original with whatever signatures remain (+ annotations).
+        document = await self.document_repository.get_document_by_id(document_id)
+        remaining = self._collect_existing_signatures(document)
+        target_pdf = self.settings.signed_storage_dir / f"{document.id}_{uuid4()}.pdf"
+        self.pdf_service.apply_signatures(
+            source_pdf=Path(document.original_path),
+            target_pdf=target_pdf,
+            signatures=remaining,
+            annotations=document.annotations,
+        )
+        final_hash = hashlib.sha256(target_pdf.read_bytes()).hexdigest()
+        updated_document = await self.document_repository.update_document_after_sign(
+            document_id=document_id,
+            final_path=str(target_pdf),
+            final_hash=final_hash,
+        )
+
+        await self.audit_repository.create_log(
+            document_id=document_id,
+            user_id=signer_id,
+            action="REGION_UNSIGNED",
+            ip_address=request_ip,
+            user_agent=user_agent,
+            document_hash=final_hash,
+        )
+        await self.session.commit()
+
+        await self.event_bus.invalidate_key(f"pending_documents:{signer_id}")
+        await self.event_bus.publish("workflow.events", {"type": "region_unsigned", "document_id": str(document_id)})
+        return updated_document
+
     async def sign_all_regions(
         self,
         document_id: UUID,

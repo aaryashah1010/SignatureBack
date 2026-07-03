@@ -126,10 +126,33 @@ async def sign_document(
     signer_user: Annotated[UserEntity, Depends(require_role({UserRole.SIGNER}))],
 ) -> DocumentResponse:
     use_case = SignDocumentUseCase(workflow_service)
+    sign_payload = payload.model_dump()
     updated_document = await use_case.execute(
         document_id=document_id,
         signer_id=signer_user.id,
-        sign_payload=payload.model_dump(),
+        sign_payload=sign_payload,
+        request_ip=metadata["ip_address"],
+        user_agent=metadata["user_agent"],
+    )
+    # #3: remember this signature for reuse on future documents when asked.
+    if sign_payload.get("remember_signature"):
+        await workflow_service.save_user_signature(signer_user.id, sign_payload)
+    return to_document_response(updated_document)
+
+
+@router.post("/{document_id}/regions/{region_id}/unsign", response_model=DocumentResponse)
+async def unsign_region(
+    document_id: UUID,
+    region_id: UUID,
+    workflow_service: Annotated[DocumentWorkflowService, Depends(get_document_workflow_service)],
+    metadata: Annotated[dict[str, str], Depends(request_context)],
+    signer_user: Annotated[UserEntity, Depends(require_role({UserRole.SIGNER}))],
+) -> DocumentResponse:
+    """Remove the current signer's signature from a single region."""
+    updated_document = await workflow_service.unsign_region(
+        document_id=document_id,
+        region_id=region_id,
+        signer_id=signer_user.id,
         request_ip=metadata["ip_address"],
         user_agent=metadata["user_agent"],
     )
