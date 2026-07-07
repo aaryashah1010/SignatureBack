@@ -1,25 +1,32 @@
-import json
+import logging
 from typing import Any
 
-from redis.asyncio import Redis
-
-from app.core.config import get_settings
+logger = logging.getLogger(__name__)
 
 
 class RedisEventBus:
+    """No-op event bus (Redis removed).
+
+    At this scale the only thing Redis backed was a 60s cache on the signer's
+    pending-documents query (a single trivial DB call) plus a pub/sub channel with
+    no subscribers. Both were removed. This keeps the same interface so callers are
+    unchanged: writes/publishes do nothing, and reads always report a cache miss,
+    so the pending-documents query goes straight to Postgres.
+    """
+
     def __init__(self) -> None:
-        settings = get_settings()
-        self.redis = Redis.from_url(settings.redis_url, decode_responses=True)
+        # No connection — nothing to set up.
+        pass
 
     async def publish(self, channel: str, payload: dict[str, Any]) -> None:
-        await self.redis.publish(channel, json.dumps(payload))
+        return None
 
     async def set_json(self, key: str, payload: list[dict], ttl_seconds: int = 60) -> None:
-        await self.redis.setex(key, ttl_seconds, json.dumps(payload))
+        return None
 
     async def get_json(self, key: str) -> list[dict] | None:
-        value = await self.redis.get(key)
-        return json.loads(value) if value else None
+        # Always a cache miss → caller queries the database directly.
+        return None
 
     async def invalidate_key(self, key: str) -> None:
-        await self.redis.delete(key)
+        return None
