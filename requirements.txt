@@ -15,6 +15,9 @@ redis==5.2.1
 pypdf==5.1.0
 reportlab==4.2.5
 Pillow==11.0.0
+# IANA timezone database — zoneinfo needs it for signature caption timestamps
+# (America/Chicago) on slim images that ship without system tzdata.
+tzdata==2024.2
 # ── External integration ──────────────────────────────────────────────────────
 # Async HTTP client for external callbacks with retry.
 httpx==0.28.1

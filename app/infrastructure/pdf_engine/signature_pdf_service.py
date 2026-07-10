@@ -14,6 +14,11 @@ from app.domain.value_objects.signature_box import SignatureBox
 
 
 _DEFAULT_ANNOTATION_COLOR = "#fde047"
+# Blue used for the signature rule + "NAME (timestamp)" caption, matching e-sign conventions.
+_SIGNATURE_CAPTION_COLOR = "#1a56db"
+# Audit report page palette.
+_AUDIT_BORDER_COLOR = "#2196c9"
+_AUDIT_HEADING_COLOR = "#2b7cb9"
 
 
 class SignaturePdfService:
@@ -82,13 +87,22 @@ class SignaturePdfService:
         self,
         source_pdf: Path,
         target_pdf: Path,
-        signatures: list[tuple[SignatureBox, bytes]],
+        signatures: list[tuple],
         annotations: list[AnnotationEntity] | None = None,
     ) -> None:
+        """Stamp signatures onto the PDF.
+
+        Each item is (box, signature_bytes) or (box, signature_bytes, caption).
+        When a caption is given, a blue rule is drawn just under the box with the
+        signer's name and signing timestamp beneath it (Adobe Sign style).
+        """
         reader = PdfReader(str(source_pdf))
         writer = PdfWriter()
 
-        for box, signature_bytes in signatures:
+        for item in signatures:
+            box, signature_bytes = item[0], item[1]
+            caption = item[2] if len(item) > 2 else None
+
             page = reader.pages[box.page_number - 1]
             page_width = float(page.mediabox.width)
             page_height = float(page.mediabox.height)
@@ -104,6 +118,8 @@ class SignaturePdfService:
             overlay_stream = io.BytesIO()
             overlay = canvas.Canvas(overlay_stream, pagesize=(page_width, page_height))
             overlay.drawImage(ImageReader(io.BytesIO(overlay_png)), box_x, box_y, width=box_width, height=box_height, mask="auto")
+            if caption:
+                self._draw_signature_caption(overlay, x=box_x, y_bottom=box_y, width=box_width, caption=caption)
             overlay.save()
             overlay_stream.seek(0)
 
@@ -174,6 +190,167 @@ class SignaturePdfService:
 
         with target_pdf.open("wb") as f:
             writer.write(f)
+
+    def render_audit_report(
+        self,
+        page_size: tuple[float, float],
+        title: str,
+        report_date: str = "",
+        created_on: str = "",
+        created_by: str = "",
+        status: str = "",
+        transaction_id: str = "",
+        history: list[dict] | None = None,
+    ) -> bytes:
+        """Render a "Final Audit Report" page (or pages) as standalone PDF bytes.
+
+        `history` is a list of {"text": str, "timestamp": str, "detail": str} events,
+        rendered in order like an e-sign audit trail.
+        """
+        page_width, page_height = page_size
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=(page_width, page_height))
+
+        border = HexColor(_AUDIT_BORDER_COLOR)
+        heading = HexColor(_AUDIT_HEADING_COLOR)
+        muted = HexColor("#555555")
+        dark = HexColor("#1f2937")
+        margin = 42.0
+
+        def draw_border() -> None:
+            c.saveState()
+            c.setStrokeColor(border)
+            c.setLineWidth(2)
+            c.rect(24, 24, page_width - 48, page_height - 48, stroke=1, fill=0)
+            c.restoreState()
+
+        draw_border()
+        y = page_height - 78
+
+        # Title + report line
+        c.setFillColor(heading)
+        c.setFont("Helvetica", 20)
+        c.drawString(margin, y, title or "Final Audit Report")
+        y -= 16
+        c.setFillColor(dark)
+        c.setFont("Helvetica", 8)
+        c.drawString(margin, y, "Final Audit Report")
+        if report_date:
+            c.drawRightString(page_width - margin, y, report_date)
+        y -= 16
+
+        # Metadata box
+        rows = [
+            ("Created:", created_on),
+            ("By:", created_by),
+            ("Status:", status),
+            ("Transaction ID:", transaction_id),
+        ]
+        row_height = 14.0
+        box_height = row_height * len(rows) + 10
+        c.saveState()
+        c.setFillColor(HexColor("#f3f3f3"))
+        c.setStrokeColor(HexColor("#cccccc"))
+        c.setLineWidth(0.6)
+        c.rect(margin, y - box_height, page_width - 2 * margin, box_height, stroke=1, fill=1)
+        c.restoreState()
+
+        row_y = y - 16
+        for label, value in rows:
+            c.setFillColor(muted)
+            c.setFont("Helvetica", 7.5)
+            c.drawString(margin + 10, row_y, label)
+            c.setFillColor(dark)
+            c.setFont("Helvetica", 7.5)
+            c.drawString(margin + 96, row_y, self._clip(str(value or ""), page_width - margin - 110, "Helvetica", 7.5))
+            row_y -= row_height
+        y -= box_height + 28
+
+        # History heading
+        c.setFillColor(dark)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(margin, y, f'"{title}" History' if title else "History")
+        y -= 22
+
+        for event in history or []:
+            text = str(event.get("text") or "")
+            timestamp = str(event.get("timestamp") or "")
+            detail = str(event.get("detail") or "")
+
+            needed = 14 + (10 if timestamp else 0) + (10 if detail else 0) + 8
+            if y - needed < 60:  # start a new page
+                c.showPage()
+                draw_border()
+                y = page_height - 78
+
+            # bullet
+            c.saveState()
+            c.setFillColor(heading)
+            c.circle(margin + 4, y + 3, 3, stroke=0, fill=1)
+            c.restoreState()
+
+            c.setFillColor(dark)
+            c.setFont("Helvetica", 8)
+            c.drawString(margin + 16, y, self._clip(text, page_width - margin - 30, "Helvetica", 8))
+            y -= 11
+
+            if timestamp:
+                c.setFillColor(muted)
+                c.setFont("Helvetica", 7)
+                c.drawString(margin + 16, y, timestamp)
+                y -= 10
+            if detail:
+                c.setFillColor(muted)
+                c.setFont("Helvetica", 6.5)
+                c.drawString(margin + 16, y, self._clip(detail, page_width - margin - 30, "Helvetica", 6.5))
+                y -= 10
+            y -= 8
+
+        c.save()
+        buffer.seek(0)
+        return buffer.getvalue()
+
+    @staticmethod
+    def _clip(text: str, max_width: float, font_name: str, font_size: float) -> str:
+        """Truncate with an ellipsis so a long value never runs off the page."""
+        if stringWidth(text, font_name, font_size) <= max_width:
+            return text
+        ellipsis = "..."
+        while text and stringWidth(text + ellipsis, font_name, font_size) > max_width:
+            text = text[:-1]
+        return text + ellipsis
+
+    def _draw_signature_caption(
+        self,
+        overlay: canvas.Canvas,
+        x: float,
+        y_bottom: float,
+        width: float,
+        caption: str,
+    ) -> None:
+        """Draw a blue rule at the bottom of the signature box with the caption beneath it.
+
+        Caption is the signer's name + signing timestamp, e.g.
+        "JOHN DOE (Jul 8, 2026 20:56:19 CDT)".
+        """
+        overlay.saveState()
+        color = HexColor(_SIGNATURE_CAPTION_COLOR)
+        overlay.setStrokeColor(color)
+        overlay.setLineWidth(0.8)
+        overlay.line(x, y_bottom, x + width, y_bottom)
+
+        font_name = "Helvetica"
+        font_size = 6.5
+        # Shrink until the caption fits the box width (never below 4pt).
+        while font_size > 4.0 and stringWidth(caption, font_name, font_size) > width:
+            font_size -= 0.25
+
+        text_y = y_bottom - font_size - 1.5
+        if text_y >= 0:
+            overlay.setFillColor(color)
+            overlay.setFont(font_name, font_size)
+            overlay.drawString(x, text_y, caption)
+        overlay.restoreState()
 
     def _draw_annotations(
         self,

@@ -20,6 +20,32 @@ from app.infrastructure.pdf_engine.signature_pdf_service import SignaturePdfServ
 from app.infrastructure.redis.event_bus import RedisEventBus
 
 
+def _signature_timezone():
+    """US Central for signature caption timestamps; falls back to UTC without tzdata."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        return ZoneInfo("America/Chicago")
+    except ZoneInfoNotFoundError:
+        return UTC
+
+
+_SIGNATURE_TZ = _signature_timezone()
+
+
+def _format_signature_caption(name: str, signed_at: datetime | None) -> str:
+    """Render "NAME (Jul 8, 2026 20:56:19 CDT)" for the caption under a signature."""
+    if not name:
+        return ""
+    if not signed_at:
+        return name
+    if signed_at.tzinfo is None:
+        signed_at = signed_at.replace(tzinfo=UTC)
+    local = signed_at.astimezone(_SIGNATURE_TZ)
+    stamp = f"{local.strftime('%b')} {local.day}, {local.year} {local.strftime('%H:%M:%S %Z')}"
+    return f"{name} ({stamp})"
+
+
 class DocumentWorkflowService:
     def __init__(
         self,
@@ -184,11 +210,17 @@ class DocumentWorkflowService:
         signature_image_path = self.settings.signature_images_dir / f"{region.id}_{uuid4()}.png"
         signature_image_path.write_bytes(signature_bytes)
 
+        # Timestamp first so the caption under this signature shows the signing time.
+        signed_at = datetime.now(UTC)
+        signer_names = await self._signer_names(document)
+
         # Rebuild from original to avoid signature stacking artifacts and allow precise re-signing.
         all_signatures = self._collect_signatures_for_render(
             document=document,
             target_region_id=region.id,
             target_signature_bytes=signature_bytes,
+            signer_names=signer_names,
+            target_signed_at=signed_at,
         )
         self.pdf_service.apply_signatures(
             source_pdf=Path(document.original_path),
@@ -197,7 +229,6 @@ class DocumentWorkflowService:
             annotations=document.annotations,
         )
 
-        signed_at = datetime.now(UTC)
         was_resigned = region.signed
         await self.document_repository.mark_region_signed(
             region_id=region.id,
@@ -251,7 +282,8 @@ class DocumentWorkflowService:
 
         # Rebuild the PDF from the original with whatever signatures remain (+ annotations).
         document = await self.document_repository.get_document_by_id(document_id)
-        remaining = self._collect_existing_signatures(document)
+        signer_names = await self._signer_names(document)
+        remaining = self._collect_existing_signatures(document, signer_names)
         target_pdf = self.settings.signed_storage_dir / f"{document.id}_{uuid4()}.pdf"
         self.pdf_service.apply_signatures(
             source_pdf=Path(document.original_path),
@@ -307,23 +339,26 @@ class DocumentWorkflowService:
 
         method = SignatureMethod(sign_request["method"])
         signature_bytes = self._build_signature_bytes(method=method, payload=sign_request)
+        signer_names = await self._signer_names(document)
 
         # Preserve signatures already applied by OTHER signers.
-        signatures: list[tuple[SignatureBox, bytes]] = []
+        signatures: list[tuple[SignatureBox, bytes, str]] = []
         for region in document.regions:
             if region.assigned_to == signer_id:
                 continue
             if region.signed and region.signature_image_path:
                 image_path = Path(region.signature_image_path)
                 if image_path.exists():
-                    signatures.append((region.box, image_path.read_bytes()))
+                    caption = _format_signature_caption(signer_names.get(region.assigned_to, ""), region.signed_at)
+                    signatures.append((region.box, image_path.read_bytes(), caption))
 
         # Apply the one signature to each of this signer's regions and persist each image.
         signed_at = datetime.now(UTC)
+        caption = _format_signature_caption(signer_names.get(signer_id, ""), signed_at)
         for region in signer_regions:
             signature_image_path = self.settings.signature_images_dir / f"{region.id}_{uuid4()}.png"
             signature_image_path.write_bytes(signature_bytes)
-            signatures.append((region.box, signature_bytes))
+            signatures.append((region.box, signature_bytes, caption))
             await self.document_repository.mark_region_signed(
                 region_id=region.id,
                 signature_image_path=str(signature_image_path),
@@ -521,17 +556,29 @@ class DocumentWorkflowService:
         for region in document.regions:
             await self.event_bus.invalidate_key(f"pending_documents:{region.assigned_to}")
 
+    async def _signer_names(self, document: DocumentEntity) -> dict[UUID, str]:
+        """Map each region's assignee id → display name, for the signature captions."""
+        names: dict[UUID, str] = {}
+        for signer_id in {region.assigned_to for region in document.regions if region.assigned_to}:
+            user = await self.user_repository.get_by_id(signer_id)
+            names[signer_id] = user.name if user else ""
+        return names
+
     def _collect_signatures_for_render(
         self,
         document: DocumentEntity,
         target_region_id: UUID,
         target_signature_bytes: bytes,
-    ) -> list[tuple[SignatureBox, bytes]]:
-        signatures: list[tuple[SignatureBox, bytes]] = []
+        signer_names: dict[UUID, str] | None = None,
+        target_signed_at: datetime | None = None,
+    ) -> list[tuple[SignatureBox, bytes, str]]:
+        names = signer_names or {}
+        signatures: list[tuple[SignatureBox, bytes, str]] = []
 
         for region in document.regions:
             if region.id == target_region_id:
-                signatures.append((region.box, target_signature_bytes))
+                caption = _format_signature_caption(names.get(region.assigned_to, ""), target_signed_at)
+                signatures.append((region.box, target_signature_bytes, caption))
                 continue
 
             if not region.signed or not region.signature_image_path:
@@ -539,19 +586,26 @@ class DocumentWorkflowService:
 
             image_path = Path(region.signature_image_path)
             if image_path.exists():
-                signatures.append((region.box, image_path.read_bytes()))
+                caption = _format_signature_caption(names.get(region.assigned_to, ""), region.signed_at)
+                signatures.append((region.box, image_path.read_bytes(), caption))
 
         signatures.sort(key=lambda item: (item[0].page_number, item[0].y, item[0].x))
         return signatures
 
-    def _collect_existing_signatures(self, document: DocumentEntity) -> list[tuple[SignatureBox, bytes]]:
-        signatures: list[tuple[SignatureBox, bytes]] = []
+    def _collect_existing_signatures(
+        self,
+        document: DocumentEntity,
+        signer_names: dict[UUID, str] | None = None,
+    ) -> list[tuple[SignatureBox, bytes, str]]:
+        names = signer_names or {}
+        signatures: list[tuple[SignatureBox, bytes, str]] = []
         for region in document.regions:
             if not region.signed or not region.signature_image_path:
                 continue
             image_path = Path(region.signature_image_path)
             if image_path.exists():
-                signatures.append((region.box, image_path.read_bytes()))
+                caption = _format_signature_caption(names.get(region.assigned_to, ""), region.signed_at)
+                signatures.append((region.box, image_path.read_bytes(), caption))
         signatures.sort(key=lambda item: (item[0].page_number, item[0].y, item[0].x))
         return signatures
 
@@ -565,7 +619,8 @@ class DocumentWorkflowService:
         if not document or not document.final_path:
             return  # Nothing to rebuild — no signatures applied yet.
 
-        existing_signatures = self._collect_existing_signatures(document)
+        signer_names = await self._signer_names(document)
+        existing_signatures = self._collect_existing_signatures(document, signer_names)
         if not existing_signatures:
             return
 
