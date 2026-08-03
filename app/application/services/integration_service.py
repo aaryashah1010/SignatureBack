@@ -695,24 +695,24 @@ class IntegrationService:
             esign_row = await self._ext_user_repo.get_esign_request(esign_request_id)
             client_id: int | None = int(esign_row["ClientID"]) if esign_row and esign_row.get("ClientID") else None
 
-            # Step 3: always fire ProcessESignCompletion per signer so CPA can email them.
-            t = _asyncio.create_task(
-                self._send_esign_completion(
+            # Step 3 & 4: send the completion callback FIRST, then mark ESignRequests
+            # Completed. These must be sequential (not parallel): CpaDesk's endpoint
+            # rejects a request that is already 'Completed', so it must receive the
+            # signed file while the request is still open. Marking Completed only
+            # AFTER the callback avoids that race.
+            async def _complete_then_mark() -> None:
+                await self._send_esign_completion(
                     esign_request_id=esign_request_id,
                     document=document,
                     client_id=client_id,
                     client_login_detail_id=signer_login_detail_id,
                 )
-            )
-            t.add_done_callback(_log_task_error)
+                if all_signed:
+                    await self._ext_user_repo.update_esign_request_completed(esign_request_id)
+                    logger.info("All signers done — ESignRequests marked Completed: request_id=%s", esign_request_id)
 
-            # Step 4: when ALL signers are done → mark ESignRequests as Completed.
-            if all_signed:
-                t2 = _asyncio.create_task(
-                    self._ext_user_repo.update_esign_request_completed(esign_request_id)
-                )
-                t2.add_done_callback(_log_task_error)
-                logger.info("All signers done — ESignRequests marked Completed: request_id=%s", esign_request_id)
+            t = _asyncio.create_task(_complete_then_mark())
+            t.add_done_callback(_log_task_error)
         else:
             t = _asyncio.create_task(self._writeback_signed_pdf(document))
             t.add_done_callback(_log_task_error)
