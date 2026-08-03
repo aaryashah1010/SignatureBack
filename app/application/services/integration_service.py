@@ -980,11 +980,31 @@ class IntegrationService:
                     json=payload,
                 )
                 response.raise_for_status()
-            logger.info(
-                "ProcessESignCompletion succeeded: request_id=%s login_detail_id=%s",
-                esign_request_id, client_login_detail_id,
+
+            # CpaDesk returns HTTP 200 even when it rejects at the application level
+            # (e.g. {"TResult": false, "Message": "E-Sign request not found."}). A 200
+            # is NOT enough — inspect the body and treat TResult=false as a failure so
+            # we can actually see why the completion was refused.
+            body_text = response.text or ""
+            accepted = True
+            try:
+                body = response.json()
+                if isinstance(body, dict) and body.get("TResult") is False:
+                    accepted = False
+            except Exception:  # noqa: BLE001
+                pass
+
+            if accepted:
+                logger.warning(
+                    "ProcessESignCompletion OK: request_id=%s login_detail_id=%s resp=%.300s",
+                    esign_request_id, client_login_detail_id, body_text,
+                )
+                return True
+            logger.error(
+                "ProcessESignCompletion REJECTED by CpaDesk: request_id=%s login_detail_id=%s resp=%.500s",
+                esign_request_id, client_login_detail_id, body_text,
             )
-            return True
+            return False
         except Exception as exc:  # noqa: BLE001
             logger.error("ProcessESignCompletion failed for ESignRequestID=%s: %s", esign_request_id, exc)
             return False
