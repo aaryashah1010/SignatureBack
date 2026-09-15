@@ -579,7 +579,8 @@ class SignaturePdfService:
         def draw_details_card(top: float, x: float, w: float) -> float:
             fields = [("Document Name", title), ("Created On", created_on), ("Prepared By", created_by)]
             row_h = 30.0
-            card_h = row_h * len(fields) + 42.0
+            # 44 = header-to-first-field offset, 16.5 = STATUS label-to-pill-bottom, 14 = bottom padding.
+            card_h = 44.0 + row_h * len(fields) + 16.5 + 14.0
             c.saveState()
             c.setFillColor(white)
             c.setStrokeColor(frame_color)
