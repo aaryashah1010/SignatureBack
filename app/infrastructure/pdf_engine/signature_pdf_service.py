@@ -314,7 +314,7 @@ class SignaturePdfService:
         t = text.lower()
         if "e-signed" in t or "agreement completed" in t or t.strip().startswith("completed"):
             return "check", "#16a34a"
-        if "emailed" in t or "sent" in t:
+        if "mailed" in t or "sent" in t:  # matches "emailed" and CPA's "e-mailed"
             return "envelope", "#2563eb"
         if "viewed" in t or "opened" in t:
             return "eye", "#94a3b8"
