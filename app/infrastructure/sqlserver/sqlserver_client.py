@@ -9,9 +9,20 @@ empty / None results without crashing the application.
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = 0.5
+
+
+class SqlServerUnavailableError(Exception):
+    """Raised when a query could not be executed after retries (transient
+    connectivity/pool issue), as opposed to a query that legitimately
+    returned zero rows. Callers must not treat this the same as "not found".
+    """
 
 
 class SqlServerClient:
@@ -109,11 +120,22 @@ class SqlServerClient:
 
         from sqlalchemy import text
 
-        try:
-            with self._engine.connect() as conn:
-                result = conn.execute(text(sql), params)
-                keys = list(result.keys())
-                return [dict(zip(keys, row)) for row in result.fetchall()]
-        except Exception as exc:  # noqa: BLE001
-            logger.error("SQL Server query failed: %s | SQL: %.200s", exc, sql)
-            return []
+        last_exc: Exception | None = None
+        for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            try:
+                with self._engine.connect() as conn:
+                    result = conn.execute(text(sql), params)
+                    keys = list(result.keys())
+                    return [dict(zip(keys, row)) for row in result.fetchall()]
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.warning(
+                    "SQL Server query failed (attempt %d/%d): %s | SQL: %.200s",
+                    attempt, _RETRY_ATTEMPTS, exc, sql,
+                )
+                if attempt < _RETRY_ATTEMPTS:
+                    time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
+
+        # Every attempt failed: this is a transient/connectivity failure, not a
+        # legitimate empty result — callers must not treat it as "not found".
+        raise SqlServerUnavailableError(str(last_exc))

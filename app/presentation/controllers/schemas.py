@@ -139,6 +139,14 @@ class SignAllRequest(BaseModel):
     )
 
 
+class DiscardDraftRequest(BaseModel):
+    """Region ids signed this visit that the signer chose to discard instead of
+    keeping, on closing the tab without submitting. Any id not owned by the
+    caller or not actually signed is silently ignored."""
+
+    region_ids: list[UUID] = Field(default_factory=list)
+
+
 # ── Integration schemas ───────────────────────────────────────────────────────
 
 

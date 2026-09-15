@@ -15,6 +15,7 @@ from app.domain.entities.user import UserEntity
 from app.presentation.controllers.schemas import (
     AnnotationCreateRequest,
     AnnotationResponse,
+    DiscardDraftRequest,
     DocumentResponse,
     DocumentUploadResponse,
     RegionCreateRequest,
@@ -152,6 +153,27 @@ async def unsign_region(
     updated_document = await workflow_service.unsign_region(
         document_id=document_id,
         region_id=region_id,
+        signer_id=signer_user.id,
+        request_ip=metadata["ip_address"],
+        user_agent=metadata["user_agent"],
+    )
+    return to_document_response(updated_document)
+
+
+@router.post("/{document_id}/regions/discard-draft", response_model=DocumentResponse)
+async def discard_draft_regions(
+    document_id: UUID,
+    payload: DiscardDraftRequest,
+    workflow_service: Annotated[DocumentWorkflowService, Depends(get_document_workflow_service)],
+    metadata: Annotated[dict[str, str], Depends(request_context)],
+    signer_user: Annotated[UserEntity, Depends(require_role({UserRole.SIGNER}))],
+) -> DocumentResponse:
+    """Bulk-discard signatures applied this visit but never submitted (closing the
+    tab without saving). Called from the Cancel button's confirmation, and
+    best-effort from beforeunload/pagehide on a real browser tab-close."""
+    updated_document = await workflow_service.discard_draft_regions(
+        document_id=document_id,
+        region_ids=payload.region_ids,
         signer_id=signer_user.id,
         request_ip=metadata["ip_address"],
         user_agent=metadata["user_agent"],

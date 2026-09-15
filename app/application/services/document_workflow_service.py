@@ -312,6 +312,75 @@ class DocumentWorkflowService:
         await self.event_bus.publish("workflow.events", {"type": "region_unsigned", "document_id": str(document_id)})
         return updated_document
 
+    async def discard_draft_regions(
+        self,
+        document_id: UUID,
+        region_ids: list[UUID],
+        signer_id: UUID,
+        request_ip: str,
+        user_agent: str,
+    ) -> DocumentEntity:
+        """Bulk-discard signatures the signer applied but never submitted (e.g. they
+        closed the tab without finishing). Unlike unsign_region, this rebuilds the
+        PDF once for the whole batch instead of once per region, since it may run
+        as a best-effort call during page teardown with a very small time budget.
+
+        Silently ignores any id that doesn't belong to this document/signer or
+        isn't actually signed — this is a best-effort cleanup, not a user-facing
+        action that should fail hard on a stale/partial id list.
+        """
+        document = await self.document_repository.get_document_by_id(document_id)
+        if not document:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+        to_discard: list[UUID] = []
+        for region_id in region_ids:
+            region = await self.document_repository.get_region_by_id(region_id)
+            if not region or region.document_id != document_id:
+                continue
+            if region.assigned_to != signer_id:
+                continue
+            if not region.signed:
+                continue
+            to_discard.append(region_id)
+
+        if not to_discard:
+            return document
+
+        for region_id in to_discard:
+            await self.document_repository.unmark_region_signed(region_id)
+
+        document = await self.document_repository.get_document_by_id(document_id)
+        signer_names = await self._signer_names(document)
+        remaining = self._collect_existing_signatures(document, signer_names)
+        target_pdf = self.settings.signed_storage_dir / f"{document.id}_{uuid4()}.pdf"
+        self.pdf_service.apply_signatures(
+            source_pdf=Path(document.original_path),
+            target_pdf=target_pdf,
+            signatures=remaining,
+            annotations=document.annotations,
+        )
+        final_hash = hashlib.sha256(target_pdf.read_bytes()).hexdigest()
+        updated_document = await self.document_repository.update_document_after_sign(
+            document_id=document_id,
+            final_path=str(target_pdf),
+            final_hash=final_hash,
+        )
+
+        await self.audit_repository.create_log(
+            document_id=document_id,
+            user_id=signer_id,
+            action="REGIONS_DISCARDED",
+            ip_address=request_ip,
+            user_agent=user_agent,
+            document_hash=final_hash,
+        )
+        await self.session.commit()
+
+        await self.event_bus.invalidate_key(f"pending_documents:{signer_id}")
+        await self.event_bus.publish("workflow.events", {"type": "regions_discarded", "document_id": str(document_id)})
+        return updated_document
+
     async def sign_all_regions(
         self,
         document_id: UUID,

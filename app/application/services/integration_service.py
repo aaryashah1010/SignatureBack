@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -253,6 +254,35 @@ class IntegrationService:
     # 2. User resolution
     # ─────────────────────────────────────────────────────────────────────────
 
+    async def _get_or_create_user_race_safe(
+        self, email: str, name: str, role: UserRole
+    ) -> tuple[UserEntity, bool]:
+        """get_by_email → create, but safe against two concurrent launches for the
+        same brand-new user racing each other on the unique email constraint.
+
+        Returns (user, created). On a unique-constraint conflict, rolls back the
+        failed insert and re-fetches the row the other request just committed,
+        instead of letting the IntegrityError propagate as a 500.
+        """
+        local_user = await self._user_repo.get_by_email(email)
+        if local_user:
+            return local_user, False
+        try:
+            local_user = await self._user_repo.create(
+                name=name,
+                email=email,
+                password_hash=hash_password(str(uuid4())),
+                role=role,
+            )
+            await self._session.commit()
+            return local_user, True
+        except IntegrityError:
+            await self._session.rollback()
+            local_user = await self._user_repo.get_by_email(email)
+            if not local_user:
+                raise
+            return local_user, False
+
     async def resolve_or_create_local_user(self, ctx: LaunchContextEntity) -> UserEntity:
         """Upsert a local user record from the SQL Server identity.
 
@@ -304,20 +334,14 @@ class IntegrationService:
                 local_name = ext_user.full_name or ext_user.username
 
             local_role = UserRole(ctx.role)
-            local_user = await self._user_repo.get_by_email(local_email)
-            if not local_user:
-                local_user = await self._user_repo.create(
-                    name=local_name,
-                    email=local_email,
-                    password_hash=hash_password(str(uuid4())),
-                    role=local_role,
-                )
-                await self._session.commit()
-                await self._audit("LOCAL_USER_CREATED", external_user_id=ctx.external_user_id,
-                                  details=f"local_id={local_user.id}")
-            else:
-                await self._audit("LOCAL_USER_RESOLVED", external_user_id=ctx.external_user_id,
-                                  details=f"local_id={local_user.id}")
+            local_user, created = await self._get_or_create_user_race_safe(
+                local_email, local_name, local_role
+            )
+            await self._audit(
+                "LOCAL_USER_CREATED" if created else "LOCAL_USER_RESOLVED",
+                external_user_id=ctx.external_user_id,
+                details=f"local_id={local_user.id}",
+            )
             return local_user
 
         # ── Legacy flow: look up via SQL Server ───────────────────────────────
@@ -349,20 +373,14 @@ class IntegrationService:
 
         local_email = ext_user.email or f"{ext_user.external_user_id}@external.local"
         local_role = UserRole(ext_user.role)
-        local_user = await self._user_repo.get_by_email(local_email)
-        if not local_user:
-            local_user = await self._user_repo.create(
-                name=ext_user.full_name or ext_user.username,
-                email=local_email,
-                password_hash=hash_password(str(uuid4())),
-                role=local_role,
-            )
-            await self._session.commit()
-            await self._audit("LOCAL_USER_CREATED", external_user_id=ctx.external_user_id,
-                              details=f"local_id={local_user.id}")
-        else:
-            await self._audit("LOCAL_USER_RESOLVED", external_user_id=ctx.external_user_id,
-                              details=f"local_id={local_user.id}")
+        local_user, created = await self._get_or_create_user_race_safe(
+            local_email, ext_user.full_name or ext_user.username, local_role
+        )
+        await self._audit(
+            "LOCAL_USER_CREATED" if created else "LOCAL_USER_RESOLVED",
+            external_user_id=ctx.external_user_id,
+            details=f"local_id={local_user.id}",
+        )
         return local_user
 
     # ─────────────────────────────────────────────────────────────────────────

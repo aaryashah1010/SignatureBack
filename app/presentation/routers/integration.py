@@ -34,6 +34,7 @@ from app.core.dependencies import get_current_user, require_role
 from app.core.security import create_access_token
 from app.domain.entities.enums import UserRole
 from app.domain.entities.user import UserEntity
+from app.infrastructure.sqlserver.sqlserver_client import SqlServerUnavailableError
 from app.presentation.controllers.schemas import (
     LaunchRequest,
     LaunchResponse,
@@ -136,38 +137,45 @@ def get_integration_service(
 
 async def _exchange_launch_token(raw_token: str, service, raw_role: str = "", login_detail_id: int | None = None) -> LaunchResponse:
     """Shared launch flow used by both GET and POST endpoints."""
-    ctx = await service.validate_launch_token(raw_token, raw_role, login_detail_id)
-    local_user = await service.resolve_or_create_local_user(ctx)
+    try:
+        ctx = await service.validate_launch_token(raw_token, raw_role, login_detail_id)
+        local_user = await service.resolve_or_create_local_user(ctx)
 
-    document = None
-    if ctx.role == "ADMIN":
-        document = await service.bootstrap_external_document(ctx, local_user.id)
-    elif ctx.role == "SIGNER":
-        # 3-tier single-guid flow: the signer launches with the SAME EsignGuid as
-        # the admin, so validate_launch_token already resolved the exact
-        # ESignRequestID into ctx.external_document_id. Match the local document by
-        # that exact id first — this is unambiguous even when several ESignRequests
-        # reuse the same physical FileURL (which makes path matching pick the wrong
-        # doc). The access check in get_document_for_user still guards regions.
-        from app.application.services.integration_service import decrypt_path
         document = None
-        if ctx.external_document_id:
-            document = await service._doc_repo.get_by_external_document_id(
-                ctx.external_document_id
-            )
-        # Legacy 2-tier fallback: signer and admin had different ESignRequests rows
-        # linked only by the shared FileURL. external_path was stored DECRYPTED, so
-        # decrypt the launch token's FileURL before matching, and require this
-        # signer to have a region on the matched doc.
-        if document is None and ctx.document_path:
-            decrypted_url = decrypt_path(ctx.document_path)
-            document = await service._doc_repo.get_by_external_path_for_user(
-                decrypted_url, local_user.id
-            )
-        # Last resort: any document with regions assigned to this signer. If
-        # nothing matches, document stays None → route to pending list.
+        if ctx.role == "ADMIN":
+            document = await service.bootstrap_external_document(ctx, local_user.id)
+        elif ctx.role == "SIGNER":
+            # 3-tier single-guid flow: the signer launches with the SAME EsignGuid as
+            # the admin, so validate_launch_token already resolved the exact
+            # ESignRequestID into ctx.external_document_id. Match the local document by
+            # that exact id first — this is unambiguous even when several ESignRequests
+            # reuse the same physical FileURL (which makes path matching pick the wrong
+            # doc). The access check in get_document_for_user still guards regions.
+            from app.application.services.integration_service import decrypt_path
+            document = None
+            if ctx.external_document_id:
+                document = await service._doc_repo.get_by_external_document_id(
+                    ctx.external_document_id
+                )
+            # Legacy 2-tier fallback: signer and admin had different ESignRequests rows
+            # linked only by the shared FileURL. external_path was stored DECRYPTED, so
+            # decrypt the launch token's FileURL before matching, and require this
+            # signer to have a region on the matched doc.
+            if document is None and ctx.document_path:
+                decrypted_url = decrypt_path(ctx.document_path)
+                document = await service._doc_repo.get_by_external_path_for_user(
+                    decrypted_url, local_user.id
+                )
+            # Last resort: any document with regions assigned to this signer. If
+            # nothing matches, document stays None → route to pending list.
         if document is None:
             document = await service._doc_repo.get_by_assigned_user(local_user.id)
+    except SqlServerUnavailableError as exc:
+        logger.warning("Launch failed: SQL Server temporarily unreachable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Temporarily unable to reach CpaDesk — please try again in a few seconds",
+        ) from exc
 
     # Issue internal JWT carrying the standard claims.
     access_token = create_access_token(
