@@ -570,6 +570,18 @@ class IntegrationService:
             details=f"parent_client_id={client_id} user_count={len(ext_users)}",
         )
 
+        if not ext_users:
+            # No ClientUser sub-accounts exist under this client yet — fall back to
+            # the client record itself so the admin still has someone to assign to,
+            # instead of an empty dropdown.
+            client_ext = await self._ext_user_repo.get_client_by_id(str(client_id))
+            if client_ext:
+                ext_users = [client_ext]
+                await self._audit(
+                    "CLIENT_USERS_FALLBACK_TO_CLIENT",
+                    details=f"parent_client_id={client_id}",
+                )
+
         local_signers: list[UserEntity] = []
         for ext_user in ext_users:
             local_email = ext_user.email or f"{ext_user.external_user_id}@external.local"
