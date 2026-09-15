@@ -34,6 +34,21 @@ class AuditHistoryItem(BaseModel):
     detail: str = Field(default="", description="Optional secondary line, e.g. 'Signature Date: ... Time Source: server'")
 
 
+class AuditSignerItem(BaseModel):
+    """Optional — populates the report's Signers panel directly.
+
+    If omitted, the panel is best-effort derived from `History` by parsing lines
+    matching "e-signed by NAME (email)", so the report still works without this.
+    """
+
+    name: str = Field(default="", alias="Name")
+    email: str = Field(default="", alias="Email")
+    status: str = Field(default="Signed", alias="Status")
+    timestamp: str = Field(default="", alias="Timestamp")
+
+    model_config = {"populate_by_name": True}
+
+
 class AuditPageRequest(BaseModel):
     esign_request_id: int = Field(alias="ESignRequestID")
     title: str = Field(default="", alias="Title")
@@ -43,6 +58,7 @@ class AuditPageRequest(BaseModel):
     status: str = Field(default="", alias="Status")
     transaction_id: str = Field(default="", alias="TransactionId")
     history: list[AuditHistoryItem] = Field(default_factory=list, alias="History")
+    signers: list[AuditSignerItem] = Field(default_factory=list, alias="Signers")
 
     model_config = {"populate_by_name": True}
 
@@ -82,6 +98,7 @@ async def append_audit_page(
         status=payload.status,
         transaction_id=payload.transaction_id,
         history=[item.model_dump() for item in payload.history],
+        signers=[s.model_dump() for s in payload.signers] or None,
     )
 
     writer = PdfWriter()

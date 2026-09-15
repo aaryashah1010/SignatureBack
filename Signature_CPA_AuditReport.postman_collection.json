@@ -1,0 +1,50 @@
+{
+  "info": {
+    "_postman_id": "e3f8a1c2-4b7d-4a1e-9c3f-af0e2b1d7a55",
+    "name": "Signature ↔ CPA — Audit Report (Append Final Audit Report page)",
+    "description": "Standalone endpoint — CPA calls us once a document is fully signed. We take the signed PDF we already produced for that ESignRequestID, append a designed \"Final Audit Report\" page (colored header, status pill, icon-based signing timeline, signers panel), and return the resulting PDF bytes as base64. Nothing is persisted on our side — the caller stores the returned FileBytes.\n\nFLOW:\n1. CPA POSTs to /api/documents/audit-page with ESignRequestID + report metadata + History (+ optional Signers).\n2. We look up the local document already linked to that ESignRequestID, use its most recent signed PDF (falls back to the original if nothing is signed yet).\n3. We render the audit report page to match that PDF's page size and append it as the LAST page.\n4. We return { ok, ESignRequestID, FileBytes } — FileBytes is the complete PDF (original pages + the new audit page), base64-encoded.\n\nDATA NOTES:\n- Title / CreatedOn / CreatedBy / Status / History map directly to what's shown on the report.\n- TransactionId is accepted for backward compatibility but is NOT rendered anywhere on the page (removed by design).\n- Signers is OPTIONAL. If you send it, it populates the report's \"Signers\" panel (avatar, name, email, status, timestamp) directly. If you omit it, we best-effort DERIVE it by parsing \"e-signed by NAME (email)\" out of your History lines — so the report still looks complete without any change on your side. Sending Signers explicitly is more reliable if your event text format ever changes.\n\nSET COLLECTION VARIABLES:\n- signature_base_url : https://chatapp.sbs\n- esign_request_id   : <a real ESignRequestID that has already been signed/bootstrapped on our side>",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Endpoint WE expose (CPA calls this)",
+      "item": [
+        {
+          "name": "POST audit-page (append Final Audit Report)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ESignRequestID\": {{esign_request_id}},\n  \"Title\": \"Sign Pages Jonathan Mas Rodriguez\",\n  \"ReportDate\": \"2026-09-09\",\n  \"CreatedOn\": \"2026-07-07\",\n  \"CreatedBy\": \"Sunil Trivedi (admin@sntcpa.com)\",\n  \"Status\": \"Signed\",\n  \"History\": [\n    {\n      \"text\": \"Document created by Sunil Trivedi (admin@sntcpa.com)\",\n      \"timestamp\": \"2026-07-07 - 7:46:15 PM GMT\",\n      \"detail\": \"\"\n    },\n    {\n      \"text\": \"Document emailed to JONATHAN MAS RODRIGUEZ (ing.jmas1983@gmail.com) for signature\",\n      \"timestamp\": \"2026-07-07 - 7:46:27 PM GMT\",\n      \"detail\": \"\"\n    },\n    {\n      \"text\": \"Document emailed to DEVORA MAS (lcda.devoramas@gmail.com) for signature\",\n      \"timestamp\": \"2026-07-07 - 7:46:27 PM GMT\",\n      \"detail\": \"\"\n    },\n    {\n      \"text\": \"Email viewed by JONATHAN MAS RODRIGUEZ (ing.jmas1983@gmail.com)\",\n      \"timestamp\": \"2026-07-07 - 8:36:30 PM GMT\",\n      \"detail\": \"\"\n    },\n    {\n      \"text\": \"Document e-signed by JONATHAN MAS RODRIGUEZ (ing.jmas1983@gmail.com)\",\n      \"timestamp\": \"\",\n      \"detail\": \"Signature Date: 2026-07-07 - 8:40:19 PM GMT - Time Source: server\"\n    },\n    {\n      \"text\": \"Email viewed by DEVORA MAS (lcda.devoramas@gmail.com)\",\n      \"timestamp\": \"2026-07-09 - 1:54:52 AM GMT\",\n      \"detail\": \"\"\n    },\n    {\n      \"text\": \"Document e-signed by DEVORA MAS (lcda.devoramas@gmail.com)\",\n      \"timestamp\": \"\",\n      \"detail\": \"Signature Date: 2026-07-09 - 1:56:19 AM GMT - Time Source: server\"\n    },\n    {\n      \"text\": \"Agreement completed.\",\n      \"timestamp\": \"2026-07-09 - 1:56:19 AM GMT\",\n      \"detail\": \"\"\n    }\n  ],\n  \"Signers\": [\n    {\n      \"Name\": \"Jonathan Mas Rodriguez\",\n      \"Email\": \"ing.jmas1983@gmail.com\",\n      \"Status\": \"Signed\",\n      \"Timestamp\": \"2026-07-07 - 8:40:19 PM GMT\"\n    },\n    {\n      \"Name\": \"Devora Mas\",\n      \"Email\": \"lcda.devoramas@gmail.com\",\n      \"Status\": \"Signed\",\n      \"Timestamp\": \"2026-07-09 - 1:56:19 AM GMT\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{signature_base_url}}/api/documents/audit-page",
+              "host": ["{{signature_base_url}}"],
+              "path": ["api", "documents", "audit-page"]
+            },
+            "description": "REQUEST FIELDS:\n  ESignRequestID (required) — must match a document we already bootstrapped/signed.\n  Title           — Document Name shown in the header + Document Details card. Falls back to our stored document title if omitted.\n  ReportDate      — shown top-right of the header (any string, e.g. \"2026-09-09\").\n  CreatedOn       — shown in the info bar + Document Details card.\n  CreatedBy       — shown in the info bar + Document Details card.\n  Status          — drives the colored status pill: green if it contains \"signed\"/\"complet\", amber for \"pending\", red for \"reject\"/\"declin\"/\"cancel\", gray otherwise.\n  History         — array of {text, timestamp, detail}. Rendered as the icon-colored timeline:\n                      • \"emailed\"/\"sent\" in text -> blue envelope icon\n                      • \"viewed\"/\"opened\" in text -> gray eye icon\n                      • \"created\" in text -> indigo document icon\n                      • \"e-signed\"/\"agreement completed\"/starts with \"completed\" -> green checkmark\n                    timestamp is split on \" - \" into a 2-line date/time block on the right.\n                    detail renders as a small italic line under the event (e.g. \"Signature Date: ... - Time Source: server\").\n  Signers (OPTIONAL) — array of {Name, Email, Status, Timestamp}. Populates the right-hand \"Signers\" panel with an avatar, name, email and a green status badge. If omitted, we derive this automatically from History by matching \"e-signed by NAME (email)\" — so you don't have to send it, but sending it is more robust.\n  TransactionId   — accepted but IGNORED (not shown anywhere on the report; removed by design).\n\nRESPONSE 200:\n{\n  \"ok\": true,\n  \"ESignRequestID\": 42,\n  \"FileBytes\": \"<base64 of the COMPLETE pdf: original/signed pages + the new audit report page appended last>\"\n}\n\nRESPONSE 404: no local document is linked to that ESignRequestID yet (admin must have launched/bootstrapped it first).\nRESPONSE 400: the source PDF could not be found or has no pages."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Reference — what the report looks like",
+      "item": [
+        {
+          "name": "Report layout (reference)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "https://example.com", "host": ["example.com"] },
+            "description": "The appended page renders as:\n\n┌────────────────────────────────────────────┐\n│  [logo]  FINAL AUDIT REPORT      [📅 date]  │  <- mint header band with soft decorative blobs\n│          <Title>                            │\n├──────────────┬──────────────┬──────────────┤\n│ 📅 CREATED   │ 👤 PREPARED  │ 🛡 STATUS     │  <- info bar\n│   <date>     │   BY <name>  │   [SIGNED]   │\n├──────────────┴──────────────┼──────────────┤\n│ 🕐 Signing Activity          │ 📄 Document  │\n│                              │    Details   │\n│ ●━ Document created…  <date>│ ------------ │\n│ │  <timestamp>               │ 👤 Signers   │\n│ ●━ Document emailed…  <date>│  (avatars,   │\n│ │                            │   status)    │\n│ ✓━ Document e-signed…       │ ------------ │\n│    Signature Date: …        │ 🛡 \"Signed & │\n│ ✓━ Agreement completed.     │  completed\"  │\n│                              │  note        │\n├──────────────────────────────┴──────────────┤\n│ 🛡 Signing audit trail…      Page 1 of 1     │  <- footer\n└──────────────────────────────────────────────┘\n\nColor coding on timeline bullets: indigo=created, blue=emailed, gray=viewed, green check=signed/completed.\nStatus pill color: green=signed/completed, amber=pending, red=rejected/declined/cancelled, gray=other.\nOverflow onto additional pages continues the timeline full-width under a simpler green title banner; footer always shows the correct \"Page X of Y\"."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "signature_base_url", "value": "https://chatapp.sbs", "type": "string" },
+    { "key": "esign_request_id", "value": "42", "type": "string" }
+  ]
+}
