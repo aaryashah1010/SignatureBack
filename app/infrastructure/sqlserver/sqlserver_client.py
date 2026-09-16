@@ -130,6 +130,7 @@ class SqlServerClient:
             return []
 
         from sqlalchemy import text
+        from sqlalchemy.exc import ProgrammingError
 
         last_exc: Exception | None = None
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
@@ -138,6 +139,15 @@ class SqlServerClient:
                     result = conn.execute(text(sql), params)
                     keys = list(result.keys())
                     return [dict(zip(keys, row)) for row in result.fetchall()]
+            except ProgrammingError as exc:
+                # A permanent, non-connectivity error — e.g. a caller-supplied
+                # string that isn't a valid GUID being compared against a
+                # uniqueidentifier column ("Conversion failed..."). The query
+                # reached SQL Server and was rejected; retrying changes nothing,
+                # and this is not "unavailable" — it can never match a row, so
+                # treat it the same as a legitimate empty result.
+                logger.warning("SQL Server rejected the query input (not retrying): %s | SQL: %.200s", exc, sql)
+                return []
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 logger.warning(
