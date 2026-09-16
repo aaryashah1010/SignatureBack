@@ -13,6 +13,7 @@ side (stateless). Security is the HighlightGuid + HighlightToken pair.
 import base64
 import io
 import logging
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -38,6 +39,34 @@ router = APIRouter(prefix="/annotate", tags=["Annotate"])
 # CpaDesk endpoint we POST the annotated PDF bytes to (option B, like the sign flow).
 # Base URL is derived from the decrypted FileURL host; confirm the path with CPA.
 CALLBACK_PATH = "/api/ESign/ProcessHighlightDocument"
+
+# The frontend loads /meta and /file together on every page open (one to get the
+# page count, one to get the bytes), which used to mean downloading the same PDF
+# from CPA's file host twice, back to back — doubling wait time and load on a
+# host that can already be slow. Cache the bytes briefly by ref so the second
+# call reuses the first call's download instead of refetching remotely.
+_PDF_FETCH_CACHE: dict[str, tuple[float, bytes]] = {}
+_PDF_FETCH_CACHE_TTL_SECONDS = 300.0
+
+
+def _pdf_cache_get(ref: str) -> bytes | None:
+    entry = _PDF_FETCH_CACHE.get(ref)
+    if not entry:
+        return None
+    cached_at, data = entry
+    if time.monotonic() - cached_at > _PDF_FETCH_CACHE_TTL_SECONDS:
+        _PDF_FETCH_CACHE.pop(ref, None)
+        return None
+    return data
+
+
+def _pdf_cache_set(ref: str, data: bytes) -> None:
+    now = time.monotonic()
+    # Opportunistic cleanup so this never grows unbounded across many distinct refs.
+    for key, (cached_at, _) in list(_PDF_FETCH_CACHE.items()):
+        if now - cached_at > _PDF_FETCH_CACHE_TTL_SECONDS:
+            _PDF_FETCH_CACHE.pop(key, None)
+    _PDF_FETCH_CACHE[ref] = (now, data)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -103,8 +132,17 @@ async def _get_highlight_row(ref: str) -> dict:
     return row
 
 
-async def _fetch_pdf_bytes(file_url_encrypted: str) -> bytes:
-    """Decrypt the FileURL and fetch the source PDF (remote URL or local path)."""
+async def _fetch_pdf_bytes(ref: str, file_url_encrypted: str) -> bytes:
+    """Decrypt the FileURL and fetch the source PDF (remote URL or local path).
+
+    /meta and /file are both called on every page load and both need these same
+    bytes — cached by ref so the second call reuses the first's download instead
+    of hitting CPA's (sometimes slow) file host twice back to back.
+    """
+    cached = _pdf_cache_get(ref)
+    if cached is not None:
+        return cached
+
     if not file_url_encrypted:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No FileURL on highlight request")
     url = decrypt_path(file_url_encrypted)
@@ -113,14 +151,18 @@ async def _fetch_pdf_bytes(file_url_encrypted: str) -> bytes:
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.get(url, follow_redirects=True)
                 resp.raise_for_status()
-                return resp.content
+                data = resp.content
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to fetch annotate PDF from %s: %s", url, exc)
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not fetch source PDF") from exc
-    path = Path(url)
-    if not path.exists() or not path.is_file():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source PDF not found")
-    return path.read_bytes()
+    else:
+        path = Path(url)
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source PDF not found")
+        data = path.read_bytes()
+
+    _pdf_cache_set(ref, data)
+    return data
 
 
 def _to_annotation_entity(item: AnnotateItem) -> AnnotationEntity:
@@ -196,7 +238,7 @@ async def _send_highlight_callback(row: dict, file_b64: str) -> bool:
 async def annotate_meta(ref: str) -> dict:
     """Return file name + page count so the page can render the PDF."""
     row = await _get_highlight_row(ref)
-    pdf_bytes = await _fetch_pdf_bytes(row.get("FileURL") or "")
+    pdf_bytes = await _fetch_pdf_bytes(ref, row.get("FileURL") or "")
     total_pages = len(PdfReader(io.BytesIO(pdf_bytes)).pages)
     return {"ref": ref, "file_name": row.get("FileName") or "document.pdf", "total_pages": total_pages}
 
@@ -205,7 +247,7 @@ async def annotate_meta(ref: str) -> dict:
 async def annotate_file(ref: str) -> Response:
     """Stream the source PDF for annotation."""
     row = await _get_highlight_row(ref)
-    pdf_bytes = await _fetch_pdf_bytes(row.get("FileURL") or "")
+    pdf_bytes = await _fetch_pdf_bytes(ref, row.get("FileURL") or "")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -217,7 +259,7 @@ async def annotate_file(ref: str) -> Response:
 async def annotate_save(payload: AnnotateSaveRequest) -> dict:
     """Burn the annotations into the PDF and POST the result back to CpaDesk."""
     row = await _get_highlight_row(payload.ref)
-    pdf_bytes = await _fetch_pdf_bytes(row.get("FileURL") or "")
+    pdf_bytes = await _fetch_pdf_bytes(payload.ref, row.get("FileURL") or "")
 
     settings = get_settings()
     storage = settings.original_storage_dir
