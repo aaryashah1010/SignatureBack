@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_RETRY_ATTEMPTS = 3
+_RETRY_ATTEMPTS = 2
 _RETRY_BACKOFF_SECONDS = 0.5
 
 
@@ -57,12 +57,18 @@ class SqlServerClient:
 
             engine = create_engine(
                 self._url,
-                pool_size=5,
-                max_overflow=10,
-                pool_timeout=60,
+                pool_size=10,
+                max_overflow=20,
+                # Bounded low on purpose: this client already retries (see
+                # _sync_execute), so each attempt should fail fast rather than
+                # let one slow/exhausted attempt block for up to a minute — that
+                # compounding (pool wait + connect wait, x _RETRY_ATTEMPTS) is
+                # what previously turned a transient hiccup into a 45s+ frontend
+                # timeout instead of a quick, clear "temporarily unavailable".
+                pool_timeout=8,
                 pool_pre_ping=True,   # Check connection health before use
                 pool_recycle=300,     # Recycle connections every 5 min to avoid stale pool
-                connect_args={"timeout": 30},  # pyodbc TCP connect timeout (seconds)
+                connect_args={"timeout": 6},  # pyodbc TCP connect timeout (seconds)
             )
             # Do NOT call engine.connect() here — that blocks for the full TCP
             # connect + TLS + auth round-trip on every process restart (~15 s).
