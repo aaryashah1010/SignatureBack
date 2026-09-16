@@ -57,8 +57,13 @@ class SqlServerClient:
 
             engine = create_engine(
                 self._url,
-                pool_size=10,
-                max_overflow=20,
+                # Kept at the original size — CpaDesk's intermittent failures turned
+                # out to happen even with nothing changed on their end, which points
+                # more toward a connection/resource limit on their side than a local
+                # pool shortage; a bigger local pool would only make us open more
+                # simultaneous connections toward whatever that limit is.
+                pool_size=5,
+                max_overflow=10,
                 # Bounded low on purpose: this client already retries (see
                 # _sync_execute), so each attempt should fail fast rather than
                 # let one slow/exhausted attempt block for up to a minute — that
