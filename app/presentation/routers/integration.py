@@ -266,42 +266,49 @@ async def get_mapped_signers(
         signers = await service._user_repo.list_signers()
         return [MappedSignerResponse(id=s.id, name=s.name, email=s.email) for s in signers]
 
-    document = await service._doc_repo.get_document_by_id(document_id)
-    esign_row: dict | None = None
+    try:
+        document = await service._doc_repo.get_document_by_id(document_id)
+        esign_row: dict | None = None
 
-    if document and document.external_document_id:
-        try:
-            esign_request_id = int(document.external_document_id)
-            esign_row = await service._ext_user_repo.get_esign_request(esign_request_id)
-        except (TypeError, ValueError):
-            pass
+        if document and document.external_document_id:
+            try:
+                esign_request_id = int(document.external_document_id)
+                esign_row = await service._ext_user_repo.get_esign_request(esign_request_id)
+            except (TypeError, ValueError):
+                pass
 
-    # ── 3-tier flow: ClientUser WHERE ParentClientID = ESignRequests.ClientID ──
-    if esign_row and esign_row.get("ClientID"):
-        client_id = int(esign_row["ClientID"])
-        signers = await service.get_allowed_signers_for_client(client_id)
+        # ── 3-tier flow: ClientUser WHERE ParentClientID = ESignRequests.ClientID ──
+        if esign_row and esign_row.get("ClientID"):
+            client_id = int(esign_row["ClientID"])
+            signers = await service.get_allowed_signers_for_client(client_id)
+            return [MappedSignerResponse(id=s.id, name=s.name, email=s.email) for s in signers]
+
+        # ── Legacy fallback: CAPUserClientMapping by admin's LoginDetailID ─────────
+        admin_external_id: str | None = None
+        if esign_row and esign_row.get("AssignedByLoginID"):
+            admin_external_id = str(esign_row["AssignedByLoginID"])
+
+        if not admin_external_id:
+            admin_email = admin_user.email
+            if admin_email.endswith("@external.local"):
+                admin_external_id = admin_email.removesuffix("@external.local")
+            else:
+                found_id = await service._ext_user_repo.get_login_detail_id_by_email(admin_email)
+                admin_external_id = str(found_id) if found_id else None
+
+        if not admin_external_id:
+            return []
+
+        signers = await service.get_allowed_signers_for_admin(
+            admin_external_user_id=admin_external_id
+        )
         return [MappedSignerResponse(id=s.id, name=s.name, email=s.email) for s in signers]
-
-    # ── Legacy fallback: CAPUserClientMapping by admin's LoginDetailID ─────────
-    admin_external_id: str | None = None
-    if esign_row and esign_row.get("AssignedByLoginID"):
-        admin_external_id = str(esign_row["AssignedByLoginID"])
-
-    if not admin_external_id:
-        admin_email = admin_user.email
-        if admin_email.endswith("@external.local"):
-            admin_external_id = admin_email.removesuffix("@external.local")
-        else:
-            found_id = await service._ext_user_repo.get_login_detail_id_by_email(admin_email)
-            admin_external_id = str(found_id) if found_id else None
-
-    if not admin_external_id:
-        return []
-
-    signers = await service.get_allowed_signers_for_admin(
-        admin_external_user_id=admin_external_id
-    )
-    return [MappedSignerResponse(id=s.id, name=s.name, email=s.email) for s in signers]
+    except SqlServerUnavailableError as exc:
+        logger.warning("Mapped-signers lookup failed: SQL Server temporarily unreachable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Temporarily unable to reach CpaDesk — please try again in a few seconds",
+        ) from exc
 
 
 @router.post(

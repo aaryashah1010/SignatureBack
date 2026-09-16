@@ -28,6 +28,7 @@ from app.application.services.integration_service import _decrypt_esign_token, d
 from app.core.config import get_settings
 from app.domain.entities.annotation import AnnotationEntity, AnnotationKind
 from app.infrastructure.pdf_engine.signature_pdf_service import SignaturePdfService
+from app.infrastructure.sqlserver.sqlserver_client import SqlServerUnavailableError
 from app.presentation.routers.integration import _get_sqlserver_client
 
 logger = logging.getLogger(__name__)
@@ -68,16 +69,23 @@ async def _get_highlight_row(ref: str) -> dict:
     if ss is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="SQL Server not configured")
 
-    rows = await ss.execute_query(
-        """
-        SELECT TOP 1 HighlightRequestID, HighlightGuid, HighlightToken, FileName, FileURL
-        FROM   HighlightRequests
-        WHERE  HighlightGuid = :guid
-          AND  IsActive  = 1
-          AND  IsDeleted = 0
-        """,
-        {"guid": ref},
-    )
+    try:
+        rows = await ss.execute_query(
+            """
+            SELECT TOP 1 HighlightRequestID, HighlightGuid, HighlightToken, FileName, FileURL
+            FROM   HighlightRequests
+            WHERE  HighlightGuid = :guid
+              AND  IsActive  = 1
+              AND  IsDeleted = 0
+            """,
+            {"guid": ref},
+        )
+    except SqlServerUnavailableError as exc:
+        logger.warning("Annotate lookup failed: SQL Server temporarily unreachable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Temporarily unable to reach CpaDesk — please try again in a few seconds",
+        ) from exc
     if not rows:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Highlight request not found or inactive")
 
