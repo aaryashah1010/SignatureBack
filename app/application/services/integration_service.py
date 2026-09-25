@@ -575,43 +575,55 @@ class IntegrationService:
 
         return local_signers
 
-    async def get_allowed_signers_for_client(self, client_id: int) -> list[UserEntity]:
-        """Return local users for all ClientUser rows under a parent client (3-tier flow).
+    async def get_allowed_signers_for_client(
+        self, client_id: int, client_login_detail_id: int | None = None
+    ) -> list[UserEntity]:
+        """Return local users for the client itself plus every ClientUser under it (3-tier flow).
 
-        Looks up ClientUser WHERE ParentClientID = client_id, joins LoginDetail for
-        names/emails, then upserts each into the local user table so the admin can
-        assign regions to them before they've launched.
+        The client is itself a signer, so the admin's dropdown lists the client AND
+        its sub-users (ClientUser WHERE ParentClientID = client_id, joined to
+        LoginDetail for names/emails). Each is upserted into the local user table so
+        the admin can assign regions before anyone has launched.
         """
-        ext_users = await self._ext_user_repo.get_client_users_by_parent_id(client_id)
+        sub_users = await self._ext_user_repo.get_client_users_by_parent_id(client_id)
+
+        # The client's own identity: prefer its LoginDetail (that is what a client
+        # launching with loginDetailId resolves to, so regions assigned here are the
+        # ones they see), falling back to the Client record.
+        login_detail_id: int | None = None
+        if client_login_detail_id:
+            try:
+                login_detail_id = int(client_login_detail_id)
+            except (TypeError, ValueError):
+                login_detail_id = None
+        client_ext = None
+        if login_detail_id is not None:
+            client_ext = await self._ext_user_repo.get_login_detail_by_id(login_detail_id)
+        if not client_ext:
+            client_ext = await self._ext_user_repo.get_client_by_id(str(client_id))
+
+        ext_users = ([client_ext] if client_ext else []) + list(sub_users)
         await self._audit(
             "CLIENT_USERS_FETCH",
-            details=f"parent_client_id={client_id} user_count={len(ext_users)}",
+            details=(
+                f"parent_client_id={client_id} sub_user_count={len(sub_users)} "
+                f"client_included={client_ext is not None}"
+            ),
         )
 
-        if not ext_users:
-            # No ClientUser sub-accounts exist under this client yet — fall back to
-            # the client record itself so the admin still has someone to assign to,
-            # instead of an empty dropdown.
-            client_ext = await self._ext_user_repo.get_client_by_id(str(client_id))
-            if client_ext:
-                ext_users = [client_ext]
-                await self._audit(
-                    "CLIENT_USERS_FALLBACK_TO_CLIENT",
-                    details=f"parent_client_id={client_id}",
-                )
-
         local_signers: list[UserEntity] = []
+        seen_ids: set[UUID] = set()
         for ext_user in ext_users:
             local_email = ext_user.email or f"{ext_user.external_user_id}@external.local"
-            local_user = await self._user_repo.get_by_email(local_email)
-            if not local_user:
-                local_user = await self._user_repo.create(
-                    name=ext_user.full_name or ext_user.username,
-                    email=local_email,
-                    password_hash=hash_password(str(uuid4())),
-                    role=UserRole.SIGNER,
-                )
-                await self._session.commit()
+            local_user, _created = await self._get_or_create_user_race_safe(
+                local_email,
+                ext_user.full_name or ext_user.username,
+                UserRole.SIGNER,
+            )
+            # The client can also appear among its own ClientUser rows — list once.
+            if local_user.id in seen_ids:
+                continue
+            seen_ids.add(local_user.id)
             local_signers.append(local_user)
 
         return local_signers

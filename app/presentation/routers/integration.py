@@ -255,8 +255,9 @@ async def get_mapped_signers(
 ) -> list[MappedSignerResponse]:
     """Return all signers the admin is allowed to assign on this document.
 
-    3-tier flow: reads ClientID from ESignRequests → ClientUser WHERE ParentClientID=ClientID
-                 → LoginDetail for names. This is the new Admin → Client → Users model.
+    3-tier flow: reads ClientID from ESignRequests → the client itself PLUS every
+                 ClientUser WHERE ParentClientID=ClientID (LoginDetail for names).
+                 This is the new Admin → Client → Users model.
     Legacy flow: CAPUserClientMapping by admin's LoginDetailID (fallback when no ClientID).
     Fallback:    if SQL Server is not configured, returns all local SIGNER accounts.
     """
@@ -280,7 +281,9 @@ async def get_mapped_signers(
         # ── 3-tier flow: ClientUser WHERE ParentClientID = ESignRequests.ClientID ──
         if esign_row and esign_row.get("ClientID"):
             client_id = int(esign_row["ClientID"])
-            signers = await service.get_allowed_signers_for_client(client_id)
+            signers = await service.get_allowed_signers_for_client(
+                client_id, client_login_detail_id=esign_row.get("ClientLoginDetailID")
+            )
             return [MappedSignerResponse(id=s.id, name=s.name, email=s.email) for s in signers]
 
         # ── Legacy fallback: CAPUserClientMapping by admin's LoginDetailID ─────────
